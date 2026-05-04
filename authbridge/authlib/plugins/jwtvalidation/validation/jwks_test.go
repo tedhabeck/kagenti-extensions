@@ -260,6 +260,34 @@ func TestJWKSVerifier_MultiAudience_MatchSecond(t *testing.T) {
 	}
 }
 
+func TestJWKSVerifier_MultiExpectedAudiences_OneMatches(t *testing.T) {
+	privKey, jwksSrv := setupTestJWKS(t)
+	defer jwksSrv.Close()
+
+	ctx := context.Background()
+	v, err := NewJWKSVerifier(ctx, jwksSrv.URL, "http://test-issuer")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Token has audiences that overlap with the second expected audience
+	token := signToken(t, privKey, map[string]interface{}{
+		"iss": "http://test-issuer",
+		"aud": []string{"other", "my-agent"},
+		"sub": "user-123",
+		"exp": time.Now().Add(5 * time.Minute).Unix(),
+		"iat": time.Now().Unix(),
+	})
+
+	claims, err := v.Verify(ctx, token, []string{"no-match", "my-agent"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !claims.HasAudience("my-agent") {
+		t.Error("expected audience my-agent")
+	}
+}
+
 func TestJWKSVerifier_MultiExpectedAudiences_NoneMatch(t *testing.T) {
 	privKey, jwksSrv := setupTestJWKS(t)
 	defer jwksSrv.Close()
