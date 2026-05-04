@@ -271,7 +271,7 @@ func (p *JWTValidation) Configure(raw json.RawMessage) error {
 	p.inner = auth.New(auth.Config{
 		Verifier: verifier,
 		Bypass:   matcher,
-		Identity: auth.IdentityConfig{Audiences: audiences},
+		Identity: auth.IdentityConfig{Audiences: audiences, Issuer: c.Issuer},
 	})
 	return nil
 }
@@ -308,7 +308,7 @@ func (p *JWTValidation) Init(_ context.Context) error {
 			return
 		}
 		audiences := expectedAudiences(p.cfg, v)
-		p.inner.UpdateIdentity(auth.IdentityConfig{Audiences: audiences}, nil)
+		p.inner.UpdateIdentity(auth.IdentityConfig{Audiences: audiences, Issuer: p.cfg.Issuer}, nil)
 		slog.Info("jwt-validation: audience loaded from file",
 			"path", p.cfg.AudienceFile, "audiences", audiences)
 	}()

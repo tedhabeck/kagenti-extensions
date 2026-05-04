@@ -34,8 +34,7 @@ func ReadCredentialFile(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(string(b)), nil
-}
+	return strings.TrimSpace(string(b)), nil}
 
 // heartbeatInterval is how often WaitForCredentialFile emits a WARN
 // while still waiting. Chosen so that a misconfigured volume mount

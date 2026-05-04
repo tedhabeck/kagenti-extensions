@@ -21,6 +21,7 @@ import (
 type IdentityConfig struct {
 	ClientID  string   // agent's OAuth client ID (used by token-exchange)
 	Audiences []string // expected inbound JWT audiences (jwt-validation); at least one required for static inbound validation
+	Issuer    string   // expected JWT iss (jwt-validation); inbound debug logging only
 }
 
 // ActorTokenSource provides actor tokens for RFC 8693 Section 4.1 act claim chaining.
@@ -346,9 +347,14 @@ func (a *Auth) HandleInbound(ctx context.Context, authHeader, path, audience str
 		// Generic message returned to client to avoid leaking details.
 		a.IncInboundDeny(DENY_JWT_FAILED)
 		a.log.Info("JWT validation failed", "error", err)
+		var expectedIssuer string
+		if id := a.identity.Load(); id != nil {
+			expectedIssuer = id.Issuer
+		}
 		a.log.Debug("JWT validation details",
 			"path", path,
 			"expectedAudiences", audiences,
+			"expectedIssuer", expectedIssuer,
 			"error", err)
 		return &InboundResult{
 			Action:         ActionDeny,
