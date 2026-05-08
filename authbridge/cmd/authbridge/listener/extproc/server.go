@@ -294,10 +294,22 @@ func snapshotPlugins(custom map[string]any) map[string]json.RawMessage {
 }
 
 // recordInboundResponseSession appends a Phase:SessionResponse event for the
-// inbound A2A direction. Called after RunResponse completes so the event
-// carries the updated SessionID (from the response body's contextId).
+// inbound direction. Called after RunResponse completes so the event carries
+// the updated SessionID (from the response body's contextId, when an A2A
+// parser ran) or the default bucket (when the pipeline is auth-only).
+//
+// Recording gate parallels the request-phase gate in recordInboundSession
+// and the outbound-response gate in recordOutboundResponseSession: A2A,
+// Auth, or plugin-public Custom entries all qualify. The earlier gate that
+// required A2A silently dropped response events for auth-only pipelines
+// (jwt-validation without any parser) — the request phase recorded, the
+// response phase didn't, so operators saw one-sided conversations in abctl.
 func (s *Server) recordInboundResponseSession(pctx *pipeline.Context) {
-	if s.Sessions == nil || pctx.Extensions.A2A == nil {
+	if s.Sessions == nil {
+		return
+	}
+	plugins := snapshotPlugins(pctx.Extensions.Custom)
+	if pctx.Extensions.A2A == nil && pctx.Extensions.Auth == nil && plugins == nil {
 		return
 	}
 	sid := inboundSessionID(pctx)
@@ -307,7 +319,7 @@ func (s *Server) recordInboundResponseSession(pctx *pipeline.Context) {
 		Phase:      pipeline.SessionResponse,
 		A2A:        snapshotA2A(pctx.Extensions.A2A),
 		Auth:       snapshotAuth(pctx.Extensions.Auth),
-		Plugins:    snapshotPlugins(pctx.Extensions.Custom),
+		Plugins:    plugins,
 		Identity:   snapshotIdentity(pctx),
 		StatusCode: pctx.StatusCode,
 		Error:      deriveError(pctx),

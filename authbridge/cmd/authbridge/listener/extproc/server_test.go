@@ -688,15 +688,58 @@ func TestRecordInboundResponseSession(t *testing.T) {
 	}
 }
 
-func TestRecordInboundResponseSession_NoA2A(t *testing.T) {
-	// No A2A extension — nothing to record.
+func TestRecordInboundResponseSession_EmptyPctx(t *testing.T) {
+	// No A2A, no Auth, no plugin-public Custom entries — nothing to
+	// record (parallel to the empty-request gate). Auth-only and plugin-
+	// only cases are covered separately below.
 	store := session.New(5*time.Minute, 100, 0)
 	defer store.Close()
 	s := &Server{Sessions: store}
 
 	s.recordInboundResponseSession(&pipeline.Context{})
 	if store.View(session.DefaultSessionID) != nil {
-		t.Error("no session should have been created without A2A extension")
+		t.Error("no session should have been created with empty pctx")
+	}
+}
+
+// TestRecordInboundResponseSession_AuthOnly covers the exact scenario
+// Option 2 activates for the chart default pipeline (jwt-validation only,
+// no A2A parser). The request-phase gate was widened in d55524b but the
+// response-phase gate kept the old A2A-only check, so auth-only response
+// events were silently dropped — operators saw request rows without their
+// paired response rows. Locks the fix.
+func TestRecordInboundResponseSession_AuthOnly(t *testing.T) {
+	store := session.New(5*time.Minute, 100, 0)
+	defer store.Close()
+	s := &Server{Sessions: store}
+
+	pctx := &pipeline.Context{
+		Extensions: pipeline.Extensions{
+			Auth: &pipeline.AuthExtension{
+				Inbound: []pipeline.InboundAuth{{
+					Plugin:   "jwt-validation",
+					Decision: "allow",
+					Reason:   "authorized",
+				}},
+			},
+		},
+		StatusCode: 200,
+	}
+	s.recordInboundResponseSession(pctx)
+
+	v := store.View(session.DefaultSessionID)
+	if v == nil || len(v.Events) != 1 {
+		t.Fatalf("expected 1 event under default, got %v", v)
+	}
+	e := v.Events[0]
+	if e.Direction != pipeline.Inbound || e.Phase != pipeline.SessionResponse {
+		t.Errorf("event fields = (%v, %v), want (Inbound, SessionResponse)", e.Direction, e.Phase)
+	}
+	if e.Auth == nil || len(e.Auth.Inbound) != 1 || e.Auth.Inbound[0].Decision != "allow" {
+		t.Errorf("Auth extension not attached correctly: %+v", e.Auth)
+	}
+	if e.StatusCode != 200 {
+		t.Errorf("StatusCode = %d, want 200", e.StatusCode)
 	}
 }
 
