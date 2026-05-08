@@ -1091,3 +1091,160 @@ func TestRecordOutboundResponseSession_CapturesHostAndRoute(t *testing.T) {
 		t.Errorf("Duration = %v, want >= 25ms", resp.Duration)
 	}
 }
+
+// TestRecordInboundSession_AuthOnly verifies the widened gate: a request
+// that never reached a protocol parser (A2A is nil) but populated the
+// Auth extension still gets recorded. This is the session-stream
+// visibility path for auth decisions that don't carry conversation
+// payload — e.g., an authorized inbound ping to a non-A2A endpoint.
+func TestRecordInboundSession_AuthOnly(t *testing.T) {
+	store := session.New(5*time.Minute, 100, 0)
+	defer store.Close()
+	s := &Server{Sessions: store}
+
+	pctx := &pipeline.Context{
+		Extensions: pipeline.Extensions{
+			Auth: &pipeline.AuthExtension{
+				Inbound: []pipeline.InboundAuth{{
+					Plugin:   "jwt-validation",
+					Decision: "allow",
+					Reason:   "authorized",
+				}},
+			},
+		},
+	}
+	s.recordInboundSession(pctx)
+
+	v := store.View(session.DefaultSessionID)
+	if v == nil || len(v.Events) != 1 {
+		t.Fatalf("expected 1 event under default session, got %v", v)
+	}
+	ev := v.Events[0]
+	if ev.Auth == nil || len(ev.Auth.Inbound) != 1 {
+		t.Fatalf("Auth.Inbound not snapshotted: %+v", ev.Auth)
+	}
+	if ev.Auth.Inbound[0].Decision != "allow" {
+		t.Errorf("Decision lost in snapshot: %+v", ev.Auth.Inbound[0])
+	}
+}
+
+// TestRecordInboundReject_EmitsDeniedPhase verifies the new denial
+// recording path: when the pipeline rejects an inbound request, a
+// SessionDenied event appears with the Auth diagnostic context and the
+// Violation mapped onto StatusCode + EventError. Before this, denied
+// requests were invisible in /v1/sessions.
+func TestRecordInboundReject_EmitsDeniedPhase(t *testing.T) {
+	store := session.New(5*time.Minute, 100, 0)
+	defer store.Close()
+	s := &Server{Sessions: store}
+
+	pctx := &pipeline.Context{
+		StartedAt: time.Now().Add(-10 * time.Millisecond),
+		Extensions: pipeline.Extensions{
+			Auth: &pipeline.AuthExtension{
+				Inbound: []pipeline.InboundAuth{{
+					Plugin:           "jwt-validation",
+					Decision:         "deny",
+					Reason:           "jwt_failed",
+					ExpectedIssuer:   "http://issuer.example",
+					ExpectedAudience: "agent-aud",
+				}},
+			},
+		},
+	}
+	action := pipeline.DenyStatus(401, "auth.unauthorized", "token validation failed")
+	s.recordInboundReject(pctx, action)
+
+	v := store.View(session.DefaultSessionID)
+	if v == nil || len(v.Events) != 1 {
+		t.Fatalf("expected 1 event under default session, got %v", v)
+	}
+	ev := v.Events[0]
+	if ev.Phase != pipeline.SessionDenied {
+		t.Errorf("Phase = %v, want SessionDenied", ev.Phase)
+	}
+	if ev.StatusCode != 401 {
+		t.Errorf("StatusCode = %d, want 401", ev.StatusCode)
+	}
+	if ev.Error == nil || ev.Error.Code != "auth.unauthorized" {
+		t.Errorf("Error = %+v, want code=auth.unauthorized", ev.Error)
+	}
+	if ev.Auth == nil || len(ev.Auth.Inbound) != 1 || ev.Auth.Inbound[0].Decision != "deny" {
+		t.Errorf("Auth context lost on denied event: %+v", ev.Auth)
+	}
+	if ev.Duration <= 0 {
+		t.Errorf("Duration = %v, want > 0", ev.Duration)
+	}
+}
+
+// TestRecordInboundReject_SkipsWithoutAuth ensures the denial recording
+// path is gated on Auth being populated — otherwise every plugin reject
+// (including those unrelated to auth, e.g. body-size-exceeded) would
+// land in the session stream with no useful context. Stats counters are
+// the right place for those; session denials are for auth-class events.
+func TestRecordInboundReject_SkipsWithoutAuth(t *testing.T) {
+	store := session.New(5*time.Minute, 100, 0)
+	defer store.Close()
+	s := &Server{Sessions: store}
+
+	action := pipeline.DenyStatus(413, "request.too-large", "body too large")
+	s.recordInboundReject(&pipeline.Context{}, action)
+
+	if v := store.View(session.DefaultSessionID); v != nil {
+		t.Errorf("expected no event recorded, got %+v", v)
+	}
+}
+
+// TestSnapshotPlugins_FiltersByEventSuffix verifies the plugin-public
+// observability convention: only Custom entries with keys ending in
+// pipeline.PluginEventSuffix are promoted to SessionEvent.Plugins.
+// Plugin-private state (Custom entries without the suffix, used by
+// SetState / GetState) stays out of the session stream.
+func TestSnapshotPlugins_FiltersByEventSuffix(t *testing.T) {
+	type rateLimiterPrivate struct {
+		TokenBucket int
+	}
+	type rateLimiterEvent struct {
+		Allowed    bool `json:"allowed"`
+		TokensLeft int  `json:"tokensLeft"`
+	}
+	custom := map[string]any{
+		// Private state — stored by SetState for cross-phase continuity.
+		// Must NOT appear in SessionEvent.Plugins.
+		"rate-limiter": &rateLimiterPrivate{TokenBucket: 17},
+		// Public event — stored with the "/event" suffix. Must appear,
+		// keyed by "rate-limiter" (suffix stripped) in the output map.
+		"rate-limiter" + pipeline.PluginEventSuffix: rateLimiterEvent{
+			Allowed: true, TokensLeft: 42,
+		},
+	}
+	out := snapshotPlugins(custom)
+	if _, private := out["rate-limiter"]; !private {
+		// Key exists in out because the /event entry WAS promoted.
+		// Clarifying: we want exactly one entry, keyed "rate-limiter".
+	}
+	if len(out) != 1 {
+		t.Fatalf("expected 1 promoted plugin event, got %d: %+v", len(out), out)
+	}
+	raw, ok := out["rate-limiter"]
+	if !ok {
+		t.Fatalf("expected key 'rate-limiter' (suffix stripped), got keys %v",
+			keysOf(out))
+	}
+	// Round-trip JSON to verify the payload is intact.
+	var got rateLimiterEvent
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !got.Allowed || got.TokensLeft != 42 {
+		t.Errorf("payload drifted: %+v", got)
+	}
+}
+
+func keysOf(m map[string]json.RawMessage) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}

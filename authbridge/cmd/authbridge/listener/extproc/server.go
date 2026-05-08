@@ -130,6 +130,7 @@ func (s *Server) handleInbound(stream extprocv3.ExternalProcessor_ProcessServer,
 
 	action := s.InboundPipeline.Run(ctx, pctx)
 	if action.Type == pipeline.Reject {
+		s.recordInboundReject(pctx, action)
 		return rejectFromAction(action), nil
 	}
 
@@ -149,6 +150,7 @@ func (s *Server) handleInboundBody(stream extprocv3.ExternalProcessor_ProcessSer
 
 	action := s.InboundPipeline.Run(ctx, pctx)
 	if action.Type == pipeline.Reject {
+		s.recordInboundReject(pctx, action)
 		return rejectFromAction(action), nil
 	}
 
@@ -164,15 +166,26 @@ func (s *Server) handleInboundBody(stream extprocv3.ExternalProcessor_ProcessSer
 // the previous conversation's rekeyed bucket, stranding the current turn's
 // request events in the prior bucket and creating an orphan 1-event session
 // for the response.
+//
+// Auth-only events (no A2A parser match — e.g. a rejected request that
+// never reached the parser) route to DefaultSessionID. This is where
+// operators will look for unauthorized-access events in abctl.
 func inboundSessionID(pctx *pipeline.Context) string {
-	if sid := pctx.Extensions.A2A.SessionID; sid != "" {
-		return sid
+	if pctx.Extensions.A2A != nil && pctx.Extensions.A2A.SessionID != "" {
+		return pctx.Extensions.A2A.SessionID
 	}
 	return session.DefaultSessionID
 }
 
 func (s *Server) recordInboundSession(pctx *pipeline.Context) {
-	if s.Sessions == nil || pctx.Extensions.A2A == nil {
+	if s.Sessions == nil {
+		return
+	}
+	// Widened gate (was: A2A == nil). Any of A2A / Auth / plugin-public
+	// Custom entries qualify. Keeps traffic with no protocol parser but
+	// meaningful auth state visible in the session stream.
+	plugins := snapshotPlugins(pctx.Extensions.Custom)
+	if pctx.Extensions.A2A == nil && pctx.Extensions.Auth == nil && plugins == nil {
 		return
 	}
 	sid := inboundSessionID(pctx)
@@ -181,10 +194,103 @@ func (s *Server) recordInboundSession(pctx *pipeline.Context) {
 		Direction: pipeline.Inbound,
 		Phase:     pipeline.SessionRequest,
 		A2A:       snapshotA2A(pctx.Extensions.A2A),
+		Auth:      snapshotAuth(pctx.Extensions.Auth),
+		Plugins:   plugins,
 		Identity:  snapshotIdentity(pctx),
 		Host:      pctx.Host,
 	}
 	s.Sessions.Append(sid, ev)
+}
+
+// recordInboundReject emits a SessionDenied event for requests a pipeline
+// plugin rejected. Called from the Reject path BEFORE rejectFromAction
+// returns, so denied requests appear in the session stream rather than
+// silently vanishing (which was the pre-Auth-extension behavior — denials
+// only surfaced via /stats counters, invisible to abctl). Fires only when
+// at least one plugin populated Auth — otherwise we wouldn't have
+// diagnostic context worth recording and would just be logging an HTTP
+// status.
+func (s *Server) recordInboundReject(pctx *pipeline.Context, action pipeline.Action) {
+	if s.Sessions == nil || pctx.Extensions.Auth == nil {
+		return
+	}
+	var status int
+	var code, message string
+	if action.Violation != nil {
+		// Use the structured fields directly — Render() produces the HTTP
+		// wire payload (status, headers, JSON body) which is the wrong
+		// shape for a session event. We want the semantic Code + Reason.
+		status = action.Violation.Status
+		if status == 0 {
+			status = pipeline.StatusFromCode(action.Violation.Code)
+		}
+		code = action.Violation.Code
+		message = action.Violation.Reason
+	}
+	ev := pipeline.SessionEvent{
+		At:         time.Now(),
+		Direction:  pipeline.Inbound,
+		Phase:      pipeline.SessionDenied,
+		Auth:       snapshotAuth(pctx.Extensions.Auth),
+		Plugins:    snapshotPlugins(pctx.Extensions.Custom),
+		Identity:   snapshotIdentity(pctx),
+		Host:       pctx.Host,
+		StatusCode: status,
+		Error: &pipeline.EventError{
+			Kind:    "policy",
+			Code:    code,
+			Message: message,
+		},
+		Duration: durationSince(pctx.StartedAt),
+	}
+	s.Sessions.Append(inboundSessionID(pctx), ev)
+}
+
+// snapshotAuth returns a shallow copy of the Auth extension so the
+// recorded SessionEvent doesn't share backing slices with pctx (a later
+// plugin or OnResponse hook could append another entry otherwise).
+func snapshotAuth(ext *pipeline.AuthExtension) *pipeline.AuthExtension {
+	if ext == nil {
+		return nil
+	}
+	out := &pipeline.AuthExtension{}
+	if len(ext.Inbound) > 0 {
+		out.Inbound = append([]pipeline.InboundAuth(nil), ext.Inbound...)
+	}
+	if len(ext.Outbound) > 0 {
+		out.Outbound = append([]pipeline.OutboundAuth(nil), ext.Outbound...)
+	}
+	return out
+}
+
+// snapshotPlugins collects plugin-public observability events from
+// pctx.Extensions.Custom entries whose keys end in PluginEventSuffix.
+// Each matching value is json.Marshaled into the wire-form map under
+// the plugin name (suffix stripped). Marshal errors downgrade to slog
+// Debug and skip the entry rather than aborting recording — that keeps
+// a misbehaving plugin from taking out the whole session stream.
+func snapshotPlugins(custom map[string]any) map[string]json.RawMessage {
+	if len(custom) == 0 {
+		return nil
+	}
+	var out map[string]json.RawMessage
+	for k, v := range custom {
+		if !strings.HasSuffix(k, pipeline.PluginEventSuffix) {
+			continue
+		}
+		raw, err := json.Marshal(v)
+		if err != nil {
+			slog.Debug("session: skipping non-marshalable plugin event",
+				"key", k, "error", err)
+			continue
+		}
+		if out == nil {
+			out = make(map[string]json.RawMessage)
+		}
+		pluginName := strings.TrimSuffix(k, pipeline.PluginEventSuffix)
+		out[pluginName] = raw
+	}
+	return out
 }
 
 // recordInboundResponseSession appends a Phase:SessionResponse event for the
@@ -200,6 +306,8 @@ func (s *Server) recordInboundResponseSession(pctx *pipeline.Context) {
 		Direction:  pipeline.Inbound,
 		Phase:      pipeline.SessionResponse,
 		A2A:        snapshotA2A(pctx.Extensions.A2A),
+		Auth:       snapshotAuth(pctx.Extensions.Auth),
+		Plugins:    snapshotPlugins(pctx.Extensions.Custom),
 		Identity:   snapshotIdentity(pctx),
 		StatusCode: pctx.StatusCode,
 		Error:      deriveError(pctx),
@@ -220,12 +328,15 @@ func (s *Server) recordOutboundResponseSession(pctx *pipeline.Context) {
 	if sid == "" {
 		sid = session.DefaultSessionID
 	}
+	plugins := snapshotPlugins(pctx.Extensions.Custom)
 	ev := pipeline.SessionEvent{
 		At:             time.Now(),
 		Direction:      pipeline.Outbound,
 		Phase:          pipeline.SessionResponse,
 		MCP:            snapshotMCP(pctx.Extensions.MCP),
 		Inference:      snapshotInference(pctx.Extensions.Inference),
+		Auth:           snapshotAuth(pctx.Extensions.Auth),
+		Plugins:        plugins,
 		Identity:       snapshotIdentity(pctx),
 		StatusCode:     pctx.StatusCode,
 		Error:          deriveError(pctx),
@@ -233,7 +344,11 @@ func (s *Server) recordOutboundResponseSession(pctx *pipeline.Context) {
 		TargetAudience: routeAudience(pctx),
 		Duration:       durationSince(pctx.StartedAt),
 	}
-	if ev.MCP != nil || ev.Inference != nil {
+	// Auth / Plugins alone qualify for recording; matches the widened
+	// gate in recordInboundSession so outbound denials and plugin-public
+	// observability aren't dropped just because the response carried no
+	// MCP/Inference payload.
+	if ev.MCP != nil || ev.Inference != nil || ev.Auth != nil || plugins != nil {
 		s.Sessions.Append(sid, ev)
 	}
 }
@@ -318,17 +433,20 @@ func (s *Server) recordOutboundSession(pctx *pipeline.Context) {
 	if sid == "" {
 		sid = session.DefaultSessionID
 	}
+	plugins := snapshotPlugins(pctx.Extensions.Custom)
 	ev := pipeline.SessionEvent{
 		At:             time.Now(),
 		Direction:      pipeline.Outbound,
 		Phase:          pipeline.SessionRequest,
 		MCP:            snapshotMCP(pctx.Extensions.MCP),
 		Inference:      snapshotInference(pctx.Extensions.Inference),
+		Auth:           snapshotAuth(pctx.Extensions.Auth),
+		Plugins:        plugins,
 		Identity:       snapshotIdentity(pctx),
 		Host:           pctx.Host,
 		TargetAudience: routeAudience(pctx),
 	}
-	if ev.MCP != nil || ev.Inference != nil {
+	if ev.MCP != nil || ev.Inference != nil || ev.Auth != nil || plugins != nil {
 		s.Sessions.Append(sid, ev)
 	}
 }
