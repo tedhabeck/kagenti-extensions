@@ -300,6 +300,7 @@ func (p *JWTValidation) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 		// the raw token here — session store has no auth.
 		appendInvocationInbound(pctx, pipeline.Invocation{
 			Plugin:           "jwt-validation",
+			Phase:            pipeline.InvocationPhaseRequest,
 			Action:           pipeline.ActionDeny,
 			Reason:           result.DenyReasonCode.String(),
 			Path:             path,
@@ -325,6 +326,7 @@ func (p *JWTValidation) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 	if result.Claims == nil {
 		appendInvocationInbound(pctx, pipeline.Invocation{
 			Plugin: "jwt-validation",
+			Phase:  pipeline.InvocationPhaseRequest,
 			Action: pipeline.ActionSkip,
 			Reason: "path_bypass",
 			Path:   path,
@@ -338,6 +340,7 @@ func (p *JWTValidation) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 	pctx.Claims = result.Claims
 	appendInvocationInbound(pctx, pipeline.Invocation{
 		Plugin:        "jwt-validation",
+		Phase:         pipeline.InvocationPhaseRequest,
 		Action:        pipeline.ActionAllow,
 		Reason:        auth.APPROVE_AUTHORIZED.String(),
 		Path:          path,

@@ -474,6 +474,7 @@ func (p *TokenExchange) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 	case auth.ActionDeny:
 		appendInvocationOutbound(pctx, pipeline.Invocation{
 			Plugin:          "token-exchange",
+			Phase:           pipeline.InvocationPhaseRequest,
 			Action:          pipeline.ActionDeny,
 			Reason:          result.DenyReasonCode.String(),
 			RouteMatched:    result.RouteMatched,
@@ -498,6 +499,7 @@ func (p *TokenExchange) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 		}
 		appendInvocationOutbound(pctx, pipeline.Invocation{
 			Plugin:          "token-exchange",
+			Phase:           pipeline.InvocationPhaseRequest,
 			Action:          pipeline.ActionModify,
 			Reason:          reason,
 			RouteMatched:    true,
@@ -517,6 +519,7 @@ func (p *TokenExchange) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 		}
 		appendInvocationOutbound(pctx, pipeline.Invocation{
 			Plugin:       "token-exchange",
+			Phase:        pipeline.InvocationPhaseRequest,
 			Action:       pipeline.ActionSkip,
 			Reason:       reason,
 			RouteMatched: result.RouteMatched,

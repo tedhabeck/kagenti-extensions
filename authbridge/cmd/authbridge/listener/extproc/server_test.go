@@ -713,11 +713,16 @@ func TestRecordInboundResponseSession_AuthOnly(t *testing.T) {
 	defer store.Close()
 	s := &Server{Sessions: store}
 
+	// Record side filters by phase, so this test passes a response-phase
+	// invocation. In production jwt-validation's OnResponse is a no-op,
+	// but the test exercises the gate: any response-phase entry is
+	// sufficient to record a SessionResponse event.
 	pctx := &pipeline.Context{
 		Extensions: pipeline.Extensions{
 			Invocations: &pipeline.Invocations{
 				Inbound: []pipeline.Invocation{{
 					Plugin: "jwt-validation",
+					Phase:  pipeline.InvocationPhaseResponse,
 					Action: pipeline.ActionAllow,
 					Reason: "authorized",
 				}},
@@ -1150,6 +1155,7 @@ func TestRecordInboundSession_AuthOnly(t *testing.T) {
 			Invocations: &pipeline.Invocations{
 				Inbound: []pipeline.Invocation{{
 					Plugin: "jwt-validation",
+					Phase:  pipeline.InvocationPhaseRequest,
 					Action: pipeline.ActionAllow,
 					Reason: "authorized",
 				}},
@@ -1187,6 +1193,7 @@ func TestRecordInboundReject_EmitsDeniedPhase(t *testing.T) {
 			Invocations: &pipeline.Invocations{
 				Inbound: []pipeline.Invocation{{
 					Plugin:           "jwt-validation",
+					Phase:            pipeline.InvocationPhaseRequest,
 					Action:           pipeline.ActionDeny,
 					Reason:           "jwt_failed",
 					ExpectedIssuer:   "http://issuer.example",

@@ -192,9 +192,9 @@ func (s *Server) recordInboundSession(pctx *pipeline.Context) {
 	ev := pipeline.SessionEvent{
 		At:        time.Now(),
 		Direction: pipeline.Inbound,
-		Phase:     pipeline.SessionRequest,
-		A2A:       snapshotA2A(pctx.Extensions.A2A),
-		Invocations: snapshotInvocations(pctx.Extensions.Invocations),
+		Phase:       pipeline.SessionRequest,
+		A2A:         snapshotA2A(pctx.Extensions.A2A),
+		Invocations: snapshotInvocations(pctx.Extensions.Invocations, pipeline.InvocationPhaseRequest),
 		Plugins:   plugins,
 		Identity:  snapshotIdentity(pctx),
 		Host:      pctx.Host,
@@ -229,9 +229,9 @@ func (s *Server) recordInboundReject(pctx *pipeline.Context, action pipeline.Act
 	}
 	ev := pipeline.SessionEvent{
 		At:         time.Now(),
-		Direction:  pipeline.Inbound,
-		Phase:      pipeline.SessionDenied,
-		Invocations: snapshotInvocations(pctx.Extensions.Invocations),
+		Direction:   pipeline.Inbound,
+		Phase:       pipeline.SessionDenied,
+		Invocations: snapshotInvocations(pctx.Extensions.Invocations, pipeline.InvocationPhaseRequest),
 		Plugins:    snapshotPlugins(pctx.Extensions.Custom),
 		Identity:   snapshotIdentity(pctx),
 		Host:       pctx.Host,
@@ -247,20 +247,36 @@ func (s *Server) recordInboundReject(pctx *pipeline.Context, action pipeline.Act
 }
 
 // snapshotInvocations returns a shallow copy of the Invocations extension
-// so the recorded SessionEvent doesn't share backing slices with pctx (a
-// later plugin or OnResponse hook could append another entry otherwise).
-func snapshotInvocations(ext *pipeline.Invocations) *pipeline.Invocations {
+// filtered by phase. Plugins append to pctx.Extensions.Invocations as
+// both OnRequest and OnResponse fire; the full list lives there for
+// cross-phase inspection. At record time each SessionEvent should carry
+// only the invocations from its own phase, so request events don't
+// double-report request-phase entries AFTER the response phase has
+// already added its own. Each Invocation carries its phase tag (set by
+// the producer) — request events pass InvocationPhaseRequest, response
+// events pass InvocationPhaseResponse, denied events pass
+// InvocationPhaseRequest (denial terminates the pass before response
+// runs). Returns nil when no matching entry exists, so the recording
+// gate can check for "no invocations on this phase" cleanly.
+func snapshotInvocations(ext *pipeline.Invocations, phase pipeline.InvocationPhase) *pipeline.Invocations {
 	if ext == nil {
 		return nil
 	}
-	out := &pipeline.Invocations{}
-	if len(ext.Inbound) > 0 {
-		out.Inbound = append([]pipeline.Invocation(nil), ext.Inbound...)
+	var inbound, outbound []pipeline.Invocation
+	for _, inv := range ext.Inbound {
+		if inv.Phase == phase {
+			inbound = append(inbound, inv)
+		}
 	}
-	if len(ext.Outbound) > 0 {
-		out.Outbound = append([]pipeline.Invocation(nil), ext.Outbound...)
+	for _, inv := range ext.Outbound {
+		if inv.Phase == phase {
+			outbound = append(outbound, inv)
+		}
 	}
-	return out
+	if len(inbound) == 0 && len(outbound) == 0 {
+		return nil
+	}
+	return &pipeline.Invocations{Inbound: inbound, Outbound: outbound}
 }
 
 // snapshotPlugins collects plugin-public observability events from
@@ -316,9 +332,9 @@ func (s *Server) recordInboundResponseSession(pctx *pipeline.Context) {
 	ev := pipeline.SessionEvent{
 		At:         time.Now(),
 		Direction:  pipeline.Inbound,
-		Phase:      pipeline.SessionResponse,
-		A2A:        snapshotA2A(pctx.Extensions.A2A),
-		Invocations: snapshotInvocations(pctx.Extensions.Invocations),
+		Phase:       pipeline.SessionResponse,
+		A2A:         snapshotA2A(pctx.Extensions.A2A),
+		Invocations: snapshotInvocations(pctx.Extensions.Invocations, pipeline.InvocationPhaseResponse),
 		Plugins:    plugins,
 		Identity:   snapshotIdentity(pctx),
 		StatusCode: pctx.StatusCode,
@@ -347,7 +363,7 @@ func (s *Server) recordOutboundResponseSession(pctx *pipeline.Context) {
 		Phase:          pipeline.SessionResponse,
 		MCP:            snapshotMCP(pctx.Extensions.MCP),
 		Inference:      snapshotInference(pctx.Extensions.Inference),
-		Invocations:    snapshotInvocations(pctx.Extensions.Invocations),
+		Invocations:    snapshotInvocations(pctx.Extensions.Invocations, pipeline.InvocationPhaseResponse),
 		Plugins:        plugins,
 		Identity:       snapshotIdentity(pctx),
 		StatusCode:     pctx.StatusCode,
@@ -452,7 +468,7 @@ func (s *Server) recordOutboundSession(pctx *pipeline.Context) {
 		Phase:          pipeline.SessionRequest,
 		MCP:            snapshotMCP(pctx.Extensions.MCP),
 		Inference:      snapshotInference(pctx.Extensions.Inference),
-		Invocations:    snapshotInvocations(pctx.Extensions.Invocations),
+		Invocations:    snapshotInvocations(pctx.Extensions.Invocations, pipeline.InvocationPhaseRequest),
 		Plugins:        plugins,
 		Identity:       snapshotIdentity(pctx),
 		Host:           pctx.Host,

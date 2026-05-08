@@ -247,10 +247,30 @@ type Invocations struct {
 // NEVER contains the raw bearer token, token signature, or client
 // credentials. The session API has no auth on it; only safe-to-log data
 // belongs here.
+// InvocationPhase identifies whether an Invocation was appended during
+// the request pass or the response pass. Without this tag the full list
+// on pctx — which is cumulative across both phases — can't be correctly
+// partitioned by the listener when it records the request event and the
+// response event separately. Keeping the full list on pctx is deliberate
+// (plugins may need cross-phase context); the phase tag lets consumers
+// filter by pass.
+type InvocationPhase string
+
+const (
+	InvocationPhaseRequest  InvocationPhase = "request"
+	InvocationPhaseResponse InvocationPhase = "response"
+)
+
 type Invocation struct {
 	Plugin string           `json:"plugin"`
 	Action InvocationAction `json:"action"`
-	Reason string           `json:"reason,omitempty"`
+	// Phase is the pass (request or response) that appended this
+	// record. The listener uses it to filter invocations per event at
+	// record time — the request event carries only request-phase
+	// entries, the response event only response-phase entries, even
+	// though pctx carries the union.
+	Phase  InvocationPhase `json:"phase,omitempty"`
+	Reason string          `json:"reason,omitempty"`
 
 	// Path is the request path the invocation ran on. Populated so
 	// operators can disambiguate invocations on the same plugin (e.g.
