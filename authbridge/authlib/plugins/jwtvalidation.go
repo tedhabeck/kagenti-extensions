@@ -302,6 +302,7 @@ func (p *JWTValidation) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 			Plugin:           "jwt-validation",
 			Decision:         "deny",
 			Reason:           result.DenyReasonCode.String(),
+			Path:             path,
 			ExpectedIssuer:   p.cfg.Issuer,
 			ExpectedAudience: audience,
 		})
@@ -326,6 +327,7 @@ func (p *JWTValidation) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 			Plugin:   "jwt-validation",
 			Decision: "bypass",
 			Reason:   "path_bypass",
+			Path:     path,
 		})
 		return pipeline.Action{Type: pipeline.Continue}
 	}
@@ -338,6 +340,7 @@ func (p *JWTValidation) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 		Plugin:        "jwt-validation",
 		Decision:      "allow",
 		Reason:        auth.APPROVE_AUTHORIZED.String(),
+		Path:          path,
 		TokenSubject:  result.Claims.Subject,
 		TokenAudience: result.Claims.Audience,
 		TokenScopes:   result.Claims.Scopes,

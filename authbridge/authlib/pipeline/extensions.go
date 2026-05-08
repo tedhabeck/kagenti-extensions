@@ -204,9 +204,15 @@ type AuthExtension struct {
 // credentials. The session API has no auth on it; only safe-to-log data
 // belongs here.
 type InboundAuth struct {
-	Plugin           string   `json:"plugin"`
-	Decision         string   `json:"decision"`
-	Reason           string   `json:"reason,omitempty"`
+	Plugin   string `json:"plugin"`
+	Decision string `json:"decision"`
+	Reason   string `json:"reason,omitempty"`
+	// Path is the request path the decision was made on. Populated so
+	// operators can disambiguate bypass events (e.g. is this a kubelet
+	// /healthz probe or a Kagenti UI /.well-known/agent.json poll?) and,
+	// for deny events, spot path-targeted scans. Left empty when the
+	// plugin didn't have a path context (rare — Run always carries one).
+	Path             string   `json:"path,omitempty"`
 	ExpectedIssuer   string   `json:"expectedIssuer,omitempty"`
 	ExpectedAudience string   `json:"expectedAudience,omitempty"`
 	TokenSubject     string   `json:"tokenSubject,omitempty"`

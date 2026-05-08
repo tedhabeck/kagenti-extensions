@@ -291,7 +291,7 @@ func matchEvent(e pipeline.SessionEvent, q string) bool {
 	// `/jwt_failed` or `/expected-issuer=...` matches naturally.
 	if e.Auth != nil {
 		for _, ib := range e.Auth.Inbound {
-			hay = append(hay, ib.Plugin, ib.Decision, ib.Reason,
+			hay = append(hay, ib.Plugin, ib.Decision, ib.Reason, ib.Path,
 				ib.ExpectedIssuer, ib.ExpectedAudience, ib.TokenSubject)
 		}
 		for _, ob := range e.Auth.Outbound {
