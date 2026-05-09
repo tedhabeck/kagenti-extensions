@@ -276,7 +276,7 @@ type fakePlugin struct {
 	caps pipeline.PluginCapabilities
 }
 
-func (f *fakePlugin) Name() string                             { return f.name }
+func (f *fakePlugin) Name() string                              { return f.name }
 func (f *fakePlugin) Capabilities() pipeline.PluginCapabilities { return f.caps }
 func (f *fakePlugin) OnRequest(_ context.Context, _ *pipeline.Context) pipeline.Action {
 	return pipeline.Action{Type: pipeline.Continue}

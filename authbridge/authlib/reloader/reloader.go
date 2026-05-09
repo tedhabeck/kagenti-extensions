@@ -337,4 +337,3 @@ func (r *Reloader) recordSuccess(attempt time.Time, hash string) {
 	next.ActiveConfigSHA256 = hash
 	r.status.Store(&next)
 }
-

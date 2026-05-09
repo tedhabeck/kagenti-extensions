@@ -12,11 +12,11 @@ import (
 // Implements all optional interfaces so Holder's delegating methods
 // have something to delegate to.
 type holderTestPlugin struct {
-	name        string
-	needsBody   bool
-	notReady    bool
-	runCount    atomic.Int64
-	respCount   atomic.Int64
+	name      string
+	needsBody bool
+	notReady  bool
+	runCount  atomic.Int64
+	respCount atomic.Int64
 }
 
 func (p *holderTestPlugin) Name() string { return p.name }
