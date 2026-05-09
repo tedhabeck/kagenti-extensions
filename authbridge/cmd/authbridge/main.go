@@ -5,7 +5,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"log/slog"
 	"net"
@@ -28,6 +30,7 @@ import (
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/observe"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/reloader"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/session"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/sessionapi"
 	"github.com/kagenti/kagenti-extensions/authbridge/cmd/authbridge/listener/extauthz"
@@ -86,36 +89,41 @@ func main() {
 		log.Fatal("--config is required")
 	}
 
-	// Load config
-	cfg, err := config.Load(*configPath)
-	if err != nil {
-		log.Fatalf("loading config: %v", err)
-	}
-	if *mode != "" {
-		cfg.Mode = *mode // flag overrides YAML
-	}
-	config.ApplyPreset(cfg)
-	if err := config.Validate(cfg); err != nil {
-		log.Fatalf("config validation: %v", err)
-	}
-
-	// Build pipelines from config. Each plugin that implements
-	// pipeline.Configurable receives its own config subtree via
-	// Configure and constructs any internal state (JWKS verifier,
-	// token-exchange client, router) from it. No shared auth handler.
-	inboundPipeline, err := plugins.Build(cfg.Pipeline.Inbound.Plugins)
-	if err != nil {
-		log.Fatalf("building inbound pipeline: %v", err)
-	}
-	outboundPipeline, err := plugins.Build(cfg.Pipeline.Outbound.Plugins)
-	if err != nil {
-		log.Fatalf("building outbound pipeline: %v", err)
-	}
-
-	if cfg.Mode == config.ModeWaypoint {
-		if inboundPipeline.NeedsBody() || outboundPipeline.NeedsBody() {
-			log.Fatalf("waypoint mode does not support plugins that require body access (ext_authz limitation)")
+	// buildPipelines loads the config from *configPath, applies mode
+	// override + presets, validates, and builds the plugin pipelines.
+	// Runs once at startup and again on every reload — the reloader
+	// holds this closure so both paths share exactly the same sequence.
+	// Returns a descriptive error on any step's failure so /reload/status
+	// surfaces an operator-readable message.
+	buildPipelines := func() (*pipeline.Pipeline, *pipeline.Pipeline, *config.Config, error) {
+		c, err := config.Load(*configPath)
+		if err != nil {
+			return nil, nil, nil, err
 		}
+		if *mode != "" {
+			c.Mode = *mode // flag overrides YAML
+		}
+		config.ApplyPreset(c)
+		if err := config.Validate(c); err != nil {
+			return nil, nil, nil, err
+		}
+		in, err := plugins.Build(c.Pipeline.Inbound.Plugins)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("inbound: %w", err)
+		}
+		out, err := plugins.Build(c.Pipeline.Outbound.Plugins)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("outbound: %w", err)
+		}
+		if c.Mode == config.ModeWaypoint && (in.NeedsBody() || out.NeedsBody()) {
+			return nil, nil, nil, errors.New("waypoint mode does not support plugins that require body access (ext_authz limitation)")
+		}
+		return in, out, c, nil
+	}
+
+	inboundPipeline, outboundPipeline, cfg, err := buildPipelines()
+	if err != nil {
+		log.Fatalf("initial pipeline build: %v", err)
 	}
 
 	// Invoke Init on any plugin implementing pipeline.Initializer. Done
@@ -134,12 +142,19 @@ func main() {
 	}
 
 	// Wrap pipelines in Holders. Listeners reference the Holder rather
-	// than the *Pipeline directly so a subsequent reloader can swap the
-	// bound pipeline under a running listener without pod restart. Until
-	// the reloader lands, the Holder's contents never change — these
-	// are stable wrappers around inboundPipeline / outboundPipeline.
+	// than the *Pipeline directly so the reloader can swap the bound
+	// pipeline under a running listener without pod restart.
 	inboundH := pipeline.NewHolder(inboundPipeline)
 	outboundH := pipeline.NewHolder(outboundPipeline)
+
+	// Arm the config file watcher. ctx is cancelled on SIGTERM/SIGINT
+	// so the reloader goroutine exits cleanly at shutdown.
+	ctx, cancelCtx := context.WithCancel(context.Background())
+	defer cancelCtx()
+	rld := reloader.New(*configPath, inboundH, outboundH, buildPipelines, cfg)
+	if err := rld.Start(ctx); err != nil {
+		log.Fatalf("reloader: %v", err)
+	}
 
 	// Build session store if enabled (nil when disabled — zero overhead).
 	// Defaults to on; set session.enabled: false in runtime config to opt out.
@@ -204,7 +219,7 @@ func main() {
 		sources = append(sources, plugins.CollectStats(outboundH.Load())...)
 		return auth.MergeStats(sources...)
 	}
-	statSrv := startStatServer(cfg, statsProvider)
+	statSrv := startStatServer(cfg, rld.ConfigProvider(), statsProvider, rld.Handler())
 
 	// Session events API (optional; only when session tracking is on).
 	// The API has no authentication — bind only on in-cluster addresses and
@@ -362,11 +377,9 @@ func startHTTPServer(name string, handler http.Handler, addr string) *http.Serve
 	return srv
 }
 
-func startStatServer(cfg *config.Config, provider observe.StatsProvider) *observe.StatServer {
-	// ConfigProvider is a trivial closure over cfg here. Commit 5
-	// will swap it for the reloader's ConfigProvider so /config
-	// reflects a hot-swapped pipeline.
-	srv := observe.NewStatServer(cfg.Stats.StatsAddress, func() *config.Config { return cfg }, provider)
+func startStatServer(cfg *config.Config, cfgProvider observe.ConfigProvider, statsProvider observe.StatsProvider, reloadStatus http.Handler) *observe.StatServer {
+	srv := observe.NewStatServer(cfg.Stats.StatsAddress, cfgProvider, statsProvider,
+		observe.WithReloadStatus(reloadStatus))
 	go func() {
 		slog.Info("stat server listening", "addr", cfg.Stats.StatsAddress)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
