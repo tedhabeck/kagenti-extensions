@@ -110,6 +110,16 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		r.Header.Set("Authorization", "Bearer "+extractBearer(newAuth))
 	}
 
+	// If a WritesBody plugin rewrote pctx.Body, ship the new bytes
+	// upstream and clear Content-Encoding (see forwardproxy response
+	// path for the rationale).
+	if pctx.BodyMutated() {
+		r.Body = io.NopCloser(bytes.NewReader(pctx.Body))
+		r.ContentLength = int64(len(pctx.Body))
+		r.Header.Set("Content-Length", fmt.Sprintf("%d", len(pctx.Body)))
+		r.Header.Del("Content-Encoding")
+	}
+
 	// Remove hop-by-hop headers
 	r.Header.Del("Connection")
 	r.Header.Del("Keep-Alive")

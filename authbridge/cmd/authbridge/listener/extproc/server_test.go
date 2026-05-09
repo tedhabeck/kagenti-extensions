@@ -385,6 +385,90 @@ func (p *bodyRecorderPlugin) OnResponse(_ context.Context, _ *pipeline.Context) 
 	return pipeline.Action{Type: pipeline.Continue}
 }
 
+// bodyMutatorPlugin declares WritesBody and rewrites pctx.Body via
+// SetBody. Used to assert extproc emits a BodyMutation on the wire
+// when a plugin rewrites the request body.
+type bodyMutatorPlugin struct {
+	newBody []byte
+}
+
+func (p *bodyMutatorPlugin) Name() string { return "body-mutator" }
+func (p *bodyMutatorPlugin) Capabilities() pipeline.PluginCapabilities {
+	return pipeline.PluginCapabilities{WritesBody: true}
+}
+func (p *bodyMutatorPlugin) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
+	pctx.SetBody(p.newBody)
+	return pipeline.Action{Type: pipeline.Continue}
+}
+func (p *bodyMutatorPlugin) OnResponse(_ context.Context, _ *pipeline.Context) pipeline.Action {
+	return pipeline.Action{Type: pipeline.Continue}
+}
+
+// TestExtProc_RequestBodyMutation_Inbound: a WritesBody plugin must
+// produce a RequestBody ProcessingResponse carrying BodyMutation with
+// the new bytes, and the header mutation must request content-encoding
+// be removed.
+func TestExtProc_RequestBodyMutation_Inbound(t *testing.T) {
+	mutator := &bodyMutatorPlugin{newBody: []byte(`{"sanitized":"v"}`)}
+	inbound, err := pipeline.New([]pipeline.Plugin{mutator})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outbound, err := plugintesting.BuildPipeline([]pipeline.Plugin{plugintesting.NewTokenExchange(auth.New(auth.Config{}))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &Server{InboundPipeline: inbound, OutboundPipeline: outbound}
+
+	body := []byte(`{"original":"payload"}`)
+	stream := &mockStream{
+		ctx: context.Background(),
+		requests: []*extprocv3.ProcessingRequest{
+			inboundRequest(makeHeaders(
+				"x-authbridge-direction", "inbound",
+				":method", "POST",
+				":path", "/mcp",
+				"content-length", fmt.Sprintf("%d", len(body)),
+			)),
+			{Request: &extprocv3.ProcessingRequest_RequestBody{
+				RequestBody: &extprocv3.HttpBody{Body: body},
+			}},
+		},
+	}
+	_ = srv.Process(stream)
+
+	if len(stream.responses) != 2 {
+		t.Fatalf("expected 2 responses, got %d", len(stream.responses))
+	}
+
+	// Second response is the body-phase result. Unwrap it and assert
+	// BodyMutation carries the mutator's new bytes.
+	rb := stream.responses[1].GetRequestBody()
+	if rb == nil || rb.Response == nil || rb.Response.BodyMutation == nil {
+		t.Fatalf("expected RequestBody.Response.BodyMutation, got %+v", stream.responses[1])
+	}
+	gotBody := rb.Response.BodyMutation.GetBody()
+	if string(gotBody) != string(mutator.newBody) {
+		t.Errorf("BodyMutation.Body = %q, want %q", gotBody, mutator.newBody)
+	}
+
+	// Header mutation should include content-encoding in RemoveHeaders.
+	hm := rb.Response.HeaderMutation
+	if hm == nil {
+		t.Fatal("expected HeaderMutation to clear content-encoding")
+	}
+	found := false
+	for _, h := range hm.RemoveHeaders {
+		if h == "content-encoding" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("RemoveHeaders = %v, want to include content-encoding", hm.RemoveHeaders)
+	}
+}
+
 func TestExtProc_BodyBuffering_Inbound(t *testing.T) {
 	recorder := &bodyRecorderPlugin{}
 	p, err := pipeline.New([]pipeline.Plugin{recorder})

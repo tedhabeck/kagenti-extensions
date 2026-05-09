@@ -160,7 +160,7 @@ func (s *Server) handleInboundBody(stream extprocv3.ExternalProcessor_ProcessSer
 	}
 
 	s.recordInboundSession(pctx)
-	return allowBodyResponse(), pctx
+	return withBodyMutation(allowBodyResponse(), pctx), pctx
 }
 
 // inboundSessionID returns the bucket ID for an inbound event. Trusts the
@@ -589,9 +589,9 @@ func (s *Server) handleOutboundBody(stream extprocv3.ExternalProcessor_ProcessSe
 
 	newAuth := pctx.Headers.Get("Authorization")
 	if newAuth != originalAuth {
-		return replaceTokenBodyResponse(extractBearer(newAuth)), pctx
+		return withBodyMutation(replaceTokenBodyResponse(extractBearer(newAuth)), pctx), pctx
 	}
-	return passBodyResponse(), pctx
+	return withBodyMutation(passBodyResponse(), pctx), pctx
 }
 
 func (s *Server) handleResponseHeaders(ctx context.Context, headers *corev3.HeaderMap, pctx *pipeline.Context, direction string) *extprocv3.ProcessingResponse {
@@ -765,6 +765,38 @@ func passBodyResponse() *extprocv3.ProcessingResponse {
 			RequestBody: &extprocv3.BodyResponse{},
 		},
 	}
+}
+
+// withBodyMutation optionally decorates a RequestBody ProcessingResponse
+// with an ext_proc BodyMutation when the pipeline rewrote pctx.Body.
+// Envoy replaces the buffered body with the new bytes and recomputes
+// Content-Length for the upstream. We also clear content-encoding
+// because the plugin may have decompressed + rewritten in plaintext;
+// shipping plain bytes without the old encoding header is safer than
+// shipping a malformed archive.
+//
+// No-op when pctx.BodyMutated() is false — the common case of a
+// read-only pipeline pays no cost beyond the bool read.
+func withBodyMutation(resp *extprocv3.ProcessingResponse, pctx *pipeline.Context) *extprocv3.ProcessingResponse {
+	if !pctx.BodyMutated() {
+		return resp
+	}
+	br, ok := resp.Response.(*extprocv3.ProcessingResponse_RequestBody)
+	if !ok || br.RequestBody == nil {
+		return resp // response is an ImmediateResponse or shaped differently; leave alone.
+	}
+	if br.RequestBody.Response == nil {
+		br.RequestBody.Response = &extprocv3.CommonResponse{}
+	}
+	cr := br.RequestBody.Response
+	cr.BodyMutation = &extprocv3.BodyMutation{
+		Mutation: &extprocv3.BodyMutation_Body{Body: pctx.Body},
+	}
+	if cr.HeaderMutation == nil {
+		cr.HeaderMutation = &extprocv3.HeaderMutation{}
+	}
+	cr.HeaderMutation.RemoveHeaders = append(cr.HeaderMutation.RemoveHeaders, "content-encoding")
+	return resp
 }
 
 func allowBodyResponse() *extprocv3.ProcessingResponse {

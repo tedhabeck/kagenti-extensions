@@ -3,6 +3,7 @@ package forwardproxy
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -156,6 +157,79 @@ func (p *bodyRecorderPlugin) OnRequest(_ context.Context, pctx *pipeline.Context
 }
 func (p *bodyRecorderPlugin) OnResponse(_ context.Context, _ *pipeline.Context) pipeline.Action {
 	return pipeline.Action{Type: pipeline.Continue}
+}
+
+// bodyMutatorPlugin declares WritesBody and rewrites pctx.Body via
+// SetBody. Used below to confirm the forwardproxy propagates the
+// mutation to the upstream request.
+type bodyMutatorPlugin struct {
+	newBody []byte
+}
+
+func (p *bodyMutatorPlugin) Name() string { return "body-mutator" }
+func (p *bodyMutatorPlugin) Capabilities() pipeline.PluginCapabilities {
+	return pipeline.PluginCapabilities{WritesBody: true}
+}
+func (p *bodyMutatorPlugin) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
+	pctx.SetBody(p.newBody)
+	return pipeline.Action{Type: pipeline.Continue}
+}
+func (p *bodyMutatorPlugin) OnResponse(_ context.Context, _ *pipeline.Context) pipeline.Action {
+	return pipeline.Action{Type: pipeline.Continue}
+}
+
+// TestForwardProxy_RequestBodyMutation: a WritesBody plugin rewriting
+// pctx.Body must cause the upstream backend to receive the new bytes
+// with a correct Content-Length and no Content-Encoding.
+func TestForwardProxy_RequestBodyMutation(t *testing.T) {
+	newBody := `{"sanitized":"payload"}`
+	var (
+		gotBody   []byte
+		gotLength string
+		gotEnc    string
+	)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		gotLength = r.Header.Get("Content-Length")
+		gotEnc = r.Header.Get("Content-Encoding")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	mutator := &bodyMutatorPlugin{newBody: []byte(newBody)}
+	p, err := pipeline.New([]pipeline.Plugin{mutator})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &Server{OutboundPipeline: p, Client: http.DefaultClient}
+	proxy := httptest.NewServer(srv.Handler())
+	defer proxy.Close()
+
+	orig := `{"original":"prompt"}`
+	req, _ := http.NewRequest("POST", backend.URL+"/agent", strings.NewReader(orig))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Encoding", "gzip")
+
+	proxyClient := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(mustParseURL(proxy.URL)),
+		},
+	}
+	resp, err := proxyClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if string(gotBody) != newBody {
+		t.Errorf("backend got body = %q, want %q", gotBody, newBody)
+	}
+	if gotLength != "23" {
+		t.Errorf("Content-Length = %q, want 23", gotLength)
+	}
+	if gotEnc != "" {
+		t.Errorf("Content-Encoding = %q, want empty", gotEnc)
+	}
 }
 
 func TestForwardProxy_BodyBuffering(t *testing.T) {

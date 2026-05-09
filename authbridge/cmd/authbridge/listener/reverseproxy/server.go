@@ -99,6 +99,16 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// If a WritesBody plugin rewrote pctx.Body, send the new bytes to
+	// the backend and clear Content-Encoding (same rationale as the
+	// response path — plugin may have decompressed).
+	if pctx.BodyMutated() {
+		r.Body = io.NopCloser(bytes.NewReader(pctx.Body))
+		r.ContentLength = int64(len(pctx.Body))
+		r.Header.Set("Content-Length", fmt.Sprintf("%d", len(pctx.Body)))
+		r.Header.Del("Content-Encoding")
+	}
+
 	if s.Sessions != nil && pctx.Extensions.A2A != nil {
 		sid := pctx.Extensions.A2A.SessionID
 		if sid == "" {
