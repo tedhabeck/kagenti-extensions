@@ -157,11 +157,16 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// If a plugin mutated ResponseBody, use the mutated version.
-	if s.OutboundPipeline.NeedsBody() && pctx.ResponseBody != nil {
+	// A plugin that called pctx.SetResponseBody flipped the mutation flag.
+	// Use the replaced bytes and rewrite Content-Length so the downstream
+	// client gets a consistent response. Content-Encoding is cleared
+	// because the framework can't know if the plugin also decompressed;
+	// safer to ship plain bytes than a broken archive.
+	if pctx.ResponseBodyMutated() {
 		resp.Body = io.NopCloser(bytes.NewReader(pctx.ResponseBody))
 		resp.ContentLength = int64(len(pctx.ResponseBody))
 		resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(pctx.ResponseBody)))
+		resp.Header.Del("Content-Encoding")
 	}
 
 	if s.Sessions != nil {

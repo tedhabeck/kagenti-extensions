@@ -679,7 +679,14 @@ func (s *Server) handleResponseBody(ctx context.Context, body []byte, pctx *pipe
 		s.recordOutboundResponseSession(pctx)
 	}
 
-	if string(pctx.ResponseBody) != string(body) {
+	// A plugin that declared WritesBody: true and called pctx.SetResponseBody
+	// flips the ResponseBodyMutated flag. Emit the replacement bytes via
+	// BodyMutation so Envoy rewrites the downstream response; otherwise
+	// pass through with no mutation. The flag avoids the O(n) string
+	// compare the old path did on every response, and lets a no-op rewrite
+	// (bytes unchanged but intent was to redact-nothing) still route
+	// through the mutation path if a future test needs to observe it.
+	if pctx.ResponseBodyMutated() {
 		return &extprocv3.ProcessingResponse{
 			Response: &extprocv3.ProcessingResponse_ResponseBody{
 				ResponseBody: &extprocv3.BodyResponse{

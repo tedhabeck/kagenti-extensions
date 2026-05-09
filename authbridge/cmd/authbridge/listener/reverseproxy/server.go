@@ -146,11 +146,15 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 		return &responseRejectedError{action: action}
 	}
 
-	// If a plugin mutated ResponseBody, use the mutated version.
-	if s.InboundPipeline.NeedsBody() && pctx.ResponseBody != nil {
+	// A plugin that called pctx.SetResponseBody flipped the mutation flag.
+	// Use the replaced bytes and rewrite Content-Length so the downstream
+	// client gets a consistent response. Content-Encoding is cleared —
+	// see the same comment in forwardproxy for the rationale.
+	if pctx.ResponseBodyMutated() {
 		resp.Body = io.NopCloser(bytes.NewReader(pctx.ResponseBody))
 		resp.ContentLength = int64(len(pctx.ResponseBody))
 		resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(pctx.ResponseBody)))
+		resp.Header.Del("Content-Encoding")
 	}
 	return nil
 }
