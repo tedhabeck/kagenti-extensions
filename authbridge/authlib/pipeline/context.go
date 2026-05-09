@@ -1,6 +1,8 @@
 package pipeline
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -9,7 +11,6 @@ import (
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/routing"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/validation"
 )
-
 
 // Direction indicates whether a request is inbound (caller → this agent) or
 // outbound (this agent → target service).
@@ -77,7 +78,7 @@ type Context struct {
 	StartedAt time.Time
 
 	Agent   *AgentIdentity
-	Claims  *validation.Claims    // nil before jwt-validation runs
+	Claims  *validation.Claims // nil before jwt-validation runs
 	Route   *routing.ResolvedRoute
 	Session *SessionView // nil unless session tracking is enabled
 
@@ -97,6 +98,17 @@ type Context struct {
 	// Unexported so plugins can only set them indirectly (via the framework).
 	currentPlugin string
 	currentPhase  InvocationPhase
+
+	// bodyMutated / responseBodyMutated flag that a plugin called
+	// SetBody / SetResponseBody on this context. Listeners read the flag
+	// via BodyMutated() / ResponseBodyMutated() after Run / RunResponse
+	// to decide whether to emit a body mutation on the wire.
+	//
+	// Flags (not byte-comparison) because a mutator that rewrites to
+	// byte-identical content still wants the Invocation recorded —
+	// "tried to redact, nothing matched" is valid telemetry.
+	bodyMutated         bool
+	responseBodyMutated bool
 }
 
 // SetCurrentPlugin is called by Pipeline.Run / RunResponse immediately
@@ -189,6 +201,90 @@ func (c *Context) Modify(reason string) {
 func (c *Context) DenyAndRecord(reason, code, message string) Action {
 	c.Record(Invocation{Action: ActionDeny, Reason: reason})
 	return Deny(code, message)
+}
+
+// SetBody replaces the request body with newBody. Only meaningful when
+// the plugin declares WritesBody: true in its Capabilities — the
+// listener consults pctx.BodyMutated() after Run to decide whether to
+// emit the new bytes on the wire. Plugins without WritesBody that call
+// SetBody mutate the in-memory Context (readers downstream see the
+// change), but the wire is unchanged.
+//
+// SetBody auto-emits a modify-action Invocation with Reason
+// "body_rewritten" and publishes a plugin-public event under
+// "body-mutation/event" carrying the before/after length and sha256 —
+// never the body content. The session store has no auth, so raw bodies
+// would be a privacy / credential leak.
+//
+// Callers should NOT assign pctx.Body directly — the listener wouldn't
+// know to propagate the change, and the Invocation wouldn't be emitted.
+func (c *Context) SetBody(newBody []byte) {
+	old := c.Body
+	c.Body = newBody
+	c.bodyMutated = true
+	c.emitBodyMutation("request", old, newBody)
+}
+
+// SetResponseBody is the response-side analogue of SetBody. Used by
+// plugins that redact or rewrite the upstream response (prompt-safety
+// guardrails on LLM output, content filters, DLP). Same contract —
+// Invocation + body-mutation/event emitted; never logs the body.
+func (c *Context) SetResponseBody(newBody []byte) {
+	old := c.ResponseBody
+	c.ResponseBody = newBody
+	c.responseBodyMutated = true
+	c.emitBodyMutation("response", old, newBody)
+}
+
+// BodyMutated reports whether a plugin called SetBody during this
+// request. Listeners check this after Run to decide whether to emit a
+// body mutation on the wire. Stream-scoped — a new Context starts with
+// false regardless of what a previous request did.
+func (c *Context) BodyMutated() bool { return c.bodyMutated }
+
+// ResponseBodyMutated is the response-side analogue of BodyMutated.
+func (c *Context) ResponseBodyMutated() bool { return c.responseBodyMutated }
+
+// emitBodyMutation records the Invocation and publishes the
+// plugin-public event carrying length delta + sha256 before/after.
+// Never logs raw body bytes — the session store is unauthenticated.
+func (c *Context) emitBodyMutation(phase string, oldBody, newBody []byte) {
+	c.Record(Invocation{Action: ActionModify, Reason: "body_rewritten"})
+
+	if c.Extensions.Custom == nil {
+		c.Extensions.Custom = map[string]any{}
+	}
+	// Prefix with a synthetic "body-mutation" plugin name — per the
+	// convention in extensions.go, keys MUST be the plugin's Name(). We
+	// use a fixed plugin-like prefix here because the framework (not a
+	// specific plugin) owns this event: a switch of plugin names in a
+	// future refactor shouldn't break operators' dashboards.
+	c.Extensions.Custom["body-mutation"+PluginEventSuffix] = bodyMutationEvent{
+		Phase:        phase,
+		Plugin:       c.currentPlugin,
+		LengthBefore: len(oldBody),
+		LengthAfter:  len(newBody),
+		SHA256Before: hashHex(oldBody),
+		SHA256After:  hashHex(newBody),
+	}
+}
+
+// bodyMutationEvent is the public payload shape under the
+// body-mutation/event key. Purely observational — no raw body bytes.
+// Consumers (abctl, audit systems) can render a per-mutation timeline
+// with these fields alone.
+type bodyMutationEvent struct {
+	Phase        string `json:"phase"`  // "request" | "response"
+	Plugin       string `json:"plugin"` // plugin that called SetBody
+	LengthBefore int    `json:"length_before"`
+	LengthAfter  int    `json:"length_after"`
+	SHA256Before string `json:"sha256_before"`
+	SHA256After  string `json:"sha256_after"`
+}
+
+func hashHex(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
 
 // appendInvocation routes an Invocation to the right direction bucket
