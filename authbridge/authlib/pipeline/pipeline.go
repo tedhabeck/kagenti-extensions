@@ -177,10 +177,28 @@ func (p *Pipeline) NotReadyPlugin() string {
 	return ""
 }
 
-// NeedsBody returns true if any plugin in the pipeline declares BodyAccess.
+// NeedsBody returns true if any plugin in the pipeline needs the body
+// buffered — either to read it (ReadsBody) or to mutate it (WritesBody).
+// Normalize() folds the deprecated BodyAccess alias into ReadsBody, so
+// both legacy and modern plugins are covered by the single check.
 func (p *Pipeline) NeedsBody() bool {
 	for _, plugin := range p.plugins {
-		if plugin.Capabilities().BodyAccess {
+		caps := plugin.Capabilities().Normalize()
+		if caps.ReadsBody || caps.WritesBody {
+			return true
+		}
+	}
+	return false
+}
+
+// WritesBody returns true if any plugin in the pipeline declares
+// WritesBody. Listeners use this to decide whether to diff-and-emit a
+// body mutation on the wire. A pipeline with no WritesBody plugins
+// bypasses the mutation path entirely — zero overhead for the common
+// read-only case.
+func (p *Pipeline) WritesBody() bool {
+	for _, plugin := range p.plugins {
+		if plugin.Capabilities().Normalize().WritesBody {
 			return true
 		}
 	}
@@ -259,11 +277,19 @@ func (p *Pipeline) Stop(ctx context.Context) {
 }
 
 // validateCapabilities checks that every slot a plugin reads has been written
-// by an earlier plugin in the chain.
+// by an earlier plugin in the chain, and applies the body-mutation rules:
+//   - At most one WritesBody plugin per pipeline (direction-scoped).
+//     Mutation ordering would otherwise be ambiguous; downstream readers
+//     can't tell which version they're seeing.
+//   - A body mutator must not run before a body reader. Readers that
+//     declared ReadsBody expect to see the original bytes; placing a
+//     mutator earlier would silently change what they observe.
 func validateCapabilities(plugins []Plugin, validSlots map[string]bool) error {
 	written := make(map[string]bool)
+	var mutatorName string        // set once the first WritesBody plugin is seen
+	var readerAfterMutator string // non-empty if a ReadsBody plugin follows the mutator
 	for _, plugin := range plugins {
-		caps := plugin.Capabilities()
+		caps := plugin.Capabilities().Normalize()
 		for _, slot := range caps.Reads {
 			if !validSlots[slot] {
 				return fmt.Errorf("plugin %q declares read on unknown slot %q", plugin.Name(), slot)
@@ -278,6 +304,21 @@ func validateCapabilities(plugins []Plugin, validSlots map[string]bool) error {
 			}
 			written[slot] = true
 		}
+		if caps.WritesBody {
+			if mutatorName != "" {
+				return fmt.Errorf("pipeline: two plugins declare WritesBody: %q and %q — mutation ordering would be ambiguous; at most one body mutator per pipeline is allowed", mutatorName, plugin.Name())
+			}
+			mutatorName = plugin.Name()
+		} else if caps.ReadsBody && mutatorName != "" && readerAfterMutator == "" {
+			// ReadsBody-only plugin running AFTER a WritesBody plugin
+			// would see the mutated bytes, which surprises the reader.
+			// Stash the first occurrence; validated below so the error
+			// names both plugins involved.
+			readerAfterMutator = plugin.Name()
+		}
+	}
+	if readerAfterMutator != "" {
+		return fmt.Errorf("pipeline: plugin %q reads body after mutator %q — body readers must precede the mutator so they see the original bytes", readerAfterMutator, mutatorName)
 	}
 	return nil
 }
