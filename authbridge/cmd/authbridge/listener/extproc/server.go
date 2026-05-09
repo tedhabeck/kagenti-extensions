@@ -26,10 +26,15 @@ import (
 const maxBodySize = 1 << 20 // 1MB — matches Envoy's default per_stream_buffer_limit_bytes
 
 // Server implements the Envoy ext_proc ExternalProcessor gRPC service.
+//
+// InboundPipeline / OutboundPipeline are holders so the bound pipeline
+// can be hot-swapped under the running listener; each Process stream
+// Loads through the holder, so in-flight requests finish on the pipeline
+// they started with.
 type Server struct {
 	extprocv3.UnimplementedExternalProcessorServer
-	InboundPipeline  *pipeline.Pipeline
-	OutboundPipeline *pipeline.Pipeline
+	InboundPipeline  *pipeline.Holder
+	OutboundPipeline *pipeline.Holder
 	Sessions         *session.Store // nil when session tracking is disabled
 }
 

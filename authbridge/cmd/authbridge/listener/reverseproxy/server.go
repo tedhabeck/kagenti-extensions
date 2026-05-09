@@ -38,15 +38,19 @@ func (e *responseRejectedError) Error() string {
 }
 
 // Server is an HTTP reverse proxy with inbound JWT validation.
+//
+// InboundPipeline is a holder so the bound pipeline can be hot-swapped
+// under the running listener; each handleRequest Loads through it so
+// in-flight requests finish on the pipeline they started with.
 type Server struct {
-	InboundPipeline *pipeline.Pipeline
+	InboundPipeline *pipeline.Holder
 	Sessions        *session.Store // nil when session tracking is disabled
 	proxy           *httputil.ReverseProxy
 	backend         string
 }
 
 // NewServer creates a reverse proxy that forwards to the given backend URL.
-func NewServer(inbound *pipeline.Pipeline, sessions *session.Store, backendURL string) (*Server, error) {
+func NewServer(inbound *pipeline.Holder, sessions *session.Store, backendURL string) (*Server, error) {
 	target, err := url.Parse(backendURL)
 	if err != nil {
 		return nil, err

@@ -77,7 +77,10 @@ func serverFromAuth(t *testing.T, a *auth.Auth) *Server {
 	if err != nil {
 		t.Fatalf("building outbound pipeline: %v", err)
 	}
-	return &Server{InboundPipeline: inbound, OutboundPipeline: outbound}
+	return &Server{
+		InboundPipeline:  pipeline.NewHolder(inbound),
+		OutboundPipeline: pipeline.NewHolder(outbound),
+	}
 }
 
 func makeHeaders(kvs ...string) *corev3.HeaderMap {
@@ -394,7 +397,7 @@ func TestExtProc_BodyBuffering_Inbound(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	srv := &Server{InboundPipeline: p, OutboundPipeline: outbound}
+	srv := &Server{InboundPipeline: pipeline.NewHolder(p), OutboundPipeline: pipeline.NewHolder(outbound)}
 
 	body := []byte(`{"method":"tools/call","id":1,"params":{"name":"get_weather"}}`)
 	stream := &mockStream{
@@ -462,7 +465,7 @@ func TestExtProc_BodyBuffering_Outbound(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	srv := &Server{InboundPipeline: inbound, OutboundPipeline: p}
+	srv := &Server{InboundPipeline: pipeline.NewHolder(inbound), OutboundPipeline: pipeline.NewHolder(p)}
 
 	body := []byte(`{"key":"value"}`)
 	stream := &mockStream{
@@ -511,7 +514,7 @@ func TestExtProc_BodyTooLarge(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	srv := &Server{InboundPipeline: p, OutboundPipeline: outbound}
+	srv := &Server{InboundPipeline: pipeline.NewHolder(p), OutboundPipeline: pipeline.NewHolder(outbound)}
 
 	bigBody := make([]byte, maxBodySize+1)
 	stream := &mockStream{

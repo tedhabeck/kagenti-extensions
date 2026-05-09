@@ -133,6 +133,14 @@ func main() {
 		log.Fatalf("outbound pipeline Start: %v", err)
 	}
 
+	// Wrap pipelines in Holders. Listeners reference the Holder rather
+	// than the *Pipeline directly so a subsequent reloader can swap the
+	// bound pipeline under a running listener without pod restart. Until
+	// the reloader lands, the Holder's contents never change — these
+	// are stable wrappers around inboundPipeline / outboundPipeline.
+	inboundH := pipeline.NewHolder(inboundPipeline)
+	outboundH := pipeline.NewHolder(outboundPipeline)
+
 	// Build session store if enabled (nil when disabled — zero overhead).
 	// Defaults to on; set session.enabled: false in runtime config to opt out.
 	var sessions *session.Store
@@ -166,19 +174,19 @@ func main() {
 	// Start listeners FIRST — before credential resolution
 	switch cfg.Mode {
 	case config.ModeEnvoySidecar:
-		grpcServers = append(grpcServers, startGRPCExtProc(inboundPipeline, outboundPipeline, sessions, cfg.Listener.ExtProcAddr))
+		grpcServers = append(grpcServers, startGRPCExtProc(inboundH, outboundH, sessions, cfg.Listener.ExtProcAddr))
 
 	case config.ModeWaypoint:
-		grpcServers = append(grpcServers, startGRPCExtAuthz(inboundPipeline, outboundPipeline, cfg.Listener.ExtAuthzAddr))
-		httpServers = append(httpServers, startHTTPServer("forward-proxy", forwardproxy.NewServer(outboundPipeline, sessions).Handler(), cfg.Listener.ForwardProxyAddr))
+		grpcServers = append(grpcServers, startGRPCExtAuthz(inboundH, outboundH, cfg.Listener.ExtAuthzAddr))
+		httpServers = append(httpServers, startHTTPServer("forward-proxy", forwardproxy.NewServer(outboundH, sessions).Handler(), cfg.Listener.ForwardProxyAddr))
 
 	case config.ModeProxySidecar:
-		rpSrv, err := reverseproxy.NewServer(inboundPipeline, sessions, cfg.Listener.ReverseProxyBackend)
+		rpSrv, err := reverseproxy.NewServer(inboundH, sessions, cfg.Listener.ReverseProxyBackend)
 		if err != nil {
 			log.Fatalf("creating reverse proxy: %v", err)
 		}
 		httpServers = append(httpServers, startHTTPServer("reverse-proxy", rpSrv.Handler(), cfg.Listener.ReverseProxyAddr))
-		httpServers = append(httpServers, startHTTPServer("forward-proxy", forwardproxy.NewServer(outboundPipeline, sessions).Handler(), cfg.Listener.ForwardProxyAddr))
+		httpServers = append(httpServers, startHTTPServer("forward-proxy", forwardproxy.NewServer(outboundH, sessions).Handler(), cfg.Listener.ForwardProxyAddr))
 
 	default:
 		log.Fatalf("unhandled mode %q", cfg.Mode)
@@ -189,9 +197,11 @@ func main() {
 	// *auth.Stats; the provider merges them into a single response
 	// per HTTP request. Freshly-computed every call, so the numbers
 	// reflect traffic up to the moment of the curl.
+	// Freshly computed per /stats request. Load through the Holder so a
+	// pipeline swap is reflected without restarting the stats handler.
 	statsProvider := func() *auth.Stats {
-		sources := plugins.CollectStats(inboundPipeline)
-		sources = append(sources, plugins.CollectStats(outboundPipeline)...)
+		sources := plugins.CollectStats(inboundH.Load())
+		sources = append(sources, plugins.CollectStats(outboundH.Load())...)
 		return auth.MergeStats(sources...)
 	}
 	statSrv := startStatServer(cfg, statsProvider)
@@ -206,7 +216,7 @@ func main() {
 		sessionAPISrv = sessionapi.New(
 			cfg.Listener.SessionAPIAddr,
 			sessions,
-			sessionapi.WithPipelines(inboundPipeline, outboundPipeline),
+			sessionapi.WithPipelines(inboundH, outboundH),
 		)
 		go func() {
 			slog.Warn("session API listening — UNAUTHENTICATED; contains raw user content; never expose via ingress",
@@ -235,11 +245,13 @@ func main() {
 			// Report the first not-ready plugin by name so operators
 			// can diagnose from `kubectl describe pod` without
 			// tailing container logs.
-			if name := inboundPipeline.NotReadyPlugin(); name != "" {
+			// Holder-delegated — a hot-reloaded pipeline's readiness is
+			// reflected in the next /readyz probe.
+			if name := inboundH.NotReadyPlugin(); name != "" {
 				http.Error(w, "inbound plugin not ready: "+name, http.StatusServiceUnavailable)
 				return
 			}
-			if name := outboundPipeline.NotReadyPlugin(); name != "" {
+			if name := outboundH.NotReadyPlugin(); name != "" {
 				http.Error(w, "outbound plugin not ready: "+name, http.StatusServiceUnavailable)
 				return
 			}
@@ -290,7 +302,7 @@ func main() {
 	}
 }
 
-func startGRPCExtProc(inbound, outbound *pipeline.Pipeline, sessions *session.Store, addr string) *grpc.Server {
+func startGRPCExtProc(inbound, outbound *pipeline.Holder, sessions *session.Store, addr string) *grpc.Server {
 	srv := grpc.NewServer()
 	extprocv3.RegisterExternalProcessorServer(srv, &extproc.Server{
 		InboundPipeline:  inbound,
@@ -313,7 +325,7 @@ func startGRPCExtProc(inbound, outbound *pipeline.Pipeline, sessions *session.St
 	return srv
 }
 
-func startGRPCExtAuthz(inbound, outbound *pipeline.Pipeline, addr string) *grpc.Server {
+func startGRPCExtAuthz(inbound, outbound *pipeline.Holder, addr string) *grpc.Server {
 	srv := grpc.NewServer()
 	authv3.RegisterAuthorizationServer(srv, &extauthz.Server{
 		InboundPipeline:  inbound,

@@ -303,7 +303,7 @@ func TestHandlePipeline(t *testing.T) {
 
 	store := session.New(5*time.Minute, 100, 0)
 	defer store.Close()
-	srv := New(":0", store, WithPipelines(inbound, outbound))
+	srv := New(":0", store, WithPipelines(pipeline.NewHolder(inbound), pipeline.NewHolder(outbound)))
 	ts := httptest.NewServer(srv.server.Handler)
 	defer ts.Close()
 

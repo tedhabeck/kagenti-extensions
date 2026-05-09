@@ -24,13 +24,13 @@ func (m *mockVerifier) Verify(_ context.Context, _ string, _ string) (*validatio
 	return m.claims, m.err
 }
 
-func inboundPipelineFromAuth(t *testing.T, a *auth.Auth) *pipeline.Pipeline {
+func inboundPipelineFromAuth(t *testing.T, a *auth.Auth) *pipeline.Holder {
 	t.Helper()
 	p, err := plugintesting.BuildPipeline([]pipeline.Plugin{plugintesting.NewJWTValidation(a, false)})
 	if err != nil {
 		t.Fatalf("building inbound pipeline: %v", err)
 	}
-	return p
+	return pipeline.NewHolder(p)
 }
 
 func TestReverseProxy_AllowedRequest(t *testing.T) {
@@ -137,7 +137,7 @@ func TestReverseProxy_BodyBuffering(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := NewServer(p, nil, backend.URL)
+	srv, err := NewServer(pipeline.NewHolder(p), nil, backend.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +172,7 @@ func TestReverseProxy_BodyTooLarge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := NewServer(p, nil, backend.URL)
+	srv, err := NewServer(pipeline.NewHolder(p), nil, backend.URL)
 	if err != nil {
 		t.Fatal(err)
 	}

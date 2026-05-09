@@ -42,7 +42,10 @@ func serverFromAuth(t *testing.T, a *authpkg.Auth) *Server {
 	if err != nil {
 		t.Fatalf("building outbound pipeline: %v", err)
 	}
-	return &Server{InboundPipeline: inbound, OutboundPipeline: outbound}
+	return &Server{
+		InboundPipeline:  pipeline.NewHolder(inbound),
+		OutboundPipeline: pipeline.NewHolder(outbound),
+	}
 }
 
 func checkRequest(host, path, authHeader string) *authv3.CheckRequest {

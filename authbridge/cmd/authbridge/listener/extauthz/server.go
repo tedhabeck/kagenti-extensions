@@ -19,10 +19,15 @@ import (
 )
 
 // Server implements the Envoy ext_authz Authorization gRPC service.
+//
+// InboundPipeline / OutboundPipeline are holders so the bound pipeline
+// can be hot-swapped under the running listener; every Check() Loads
+// through the holder, so in-flight requests finish on the pipeline they
+// started with.
 type Server struct {
 	authv3.UnimplementedAuthorizationServer
-	InboundPipeline  *pipeline.Pipeline
-	OutboundPipeline *pipeline.Pipeline
+	InboundPipeline  *pipeline.Holder
+	OutboundPipeline *pipeline.Holder
 }
 
 // Check handles a single ext_authz authorization request.
