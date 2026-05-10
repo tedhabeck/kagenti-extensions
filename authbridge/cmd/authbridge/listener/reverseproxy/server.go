@@ -99,6 +99,16 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// If a WritesBody plugin rewrote pctx.Body, send the new bytes to
+	// the backend and clear Content-Encoding (same rationale as the
+	// response path — plugin may have decompressed).
+	if pctx.BodyMutated() {
+		r.Body = io.NopCloser(bytes.NewReader(pctx.Body))
+		r.ContentLength = int64(len(pctx.Body))
+		r.Header.Set("Content-Length", fmt.Sprintf("%d", len(pctx.Body)))
+		r.Header.Del("Content-Encoding")
+	}
+
 	if s.Sessions != nil && pctx.Extensions.A2A != nil {
 		sid := pctx.Extensions.A2A.SessionID
 		if sid == "" {
@@ -146,11 +156,15 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 		return &responseRejectedError{action: action}
 	}
 
-	// If a plugin mutated ResponseBody, use the mutated version.
-	if s.InboundPipeline.NeedsBody() && pctx.ResponseBody != nil {
+	// A plugin that called pctx.SetResponseBody flipped the mutation flag.
+	// Use the replaced bytes and rewrite Content-Length so the downstream
+	// client gets a consistent response. Content-Encoding is cleared —
+	// see the same comment in forwardproxy for the rationale.
+	if pctx.ResponseBodyMutated() {
 		resp.Body = io.NopCloser(bytes.NewReader(pctx.ResponseBody))
 		resp.ContentLength = int64(len(pctx.ResponseBody))
 		resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(pctx.ResponseBody)))
+		resp.Header.Del("Content-Encoding")
 	}
 	return nil
 }

@@ -171,18 +171,56 @@ for the strict-decode / defaults / validate / construct pattern.
 ## Step 5 — Body access
 
 If your plugin needs to read the request or response body (e.g., to
-parse JSON, scan for credentials, or apply a content filter), declare
-it in `Capabilities`:
+parse JSON, scan for credentials), declare `ReadsBody`:
 
 ```go
 func (p *HelloLog) Capabilities() pipeline.PluginCapabilities {
-	return pipeline.PluginCapabilities{BodyAccess: true}
+	return pipeline.PluginCapabilities{ReadsBody: true}
 }
 ```
 
-The listener then tells Envoy to buffer the body so `pctx.Body` (request)
-and `pctx.ResponseBody` (response) are populated. Without the declaration,
+The listener buffers the body so `pctx.Body` (request) and
+`pctx.ResponseBody` (response) are populated. Without the declaration,
 both stay nil even if you try to read them.
+
+### Mutating the body
+
+If your plugin needs to **rewrite** the body — prompt-redaction, output
+filtering, content transformation — declare `WritesBody` and call
+`pctx.SetBody` / `pctx.SetResponseBody`:
+
+```go
+func (p *Redactor) Capabilities() pipeline.PluginCapabilities {
+	return pipeline.PluginCapabilities{WritesBody: true} // implies ReadsBody
+}
+
+func (p *Redactor) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
+	cleaned := redactSSNs(pctx.Body)
+	pctx.SetBody(cleaned) // auto-records a modify-action Invocation
+	return pipeline.Action{Type: pipeline.Continue}
+}
+```
+
+The listener propagates the rewritten bytes to the upstream (or downstream,
+for `SetResponseBody`) with a correct `Content-Length` and a cleared
+`Content-Encoding`. `SetBody` also emits a `modify`-action Invocation with
+`Reason: "body_rewritten"` plus a `body-mutation/event` entry in
+`pctx.Extensions.Custom` carrying the length delta and sha256 before/after
+(never the raw body content).
+
+**Rules enforced by `pipeline.New`:**
+- At most one `WritesBody` plugin per pipeline. Two mutators = ambiguous
+  ordering → build fails at startup.
+- A `WritesBody` plugin must run **after** any `ReadsBody`-only plugin.
+  Readers see the original bytes; a mutator in front would silently
+  feed them post-rewrite content.
+
+Don't assign `pctx.Body = newBytes` directly — the listener won't
+propagate the mutation and no Invocation fires. Always use `SetBody`.
+
+See [`framework-architecture.md` §6, "Body mutation"](./framework-architecture.md#body-mutation)
+for the full lifecycle, per-listener wire details, and content-encoding
+policy.
 
 ## Step 6 — Out-of-tree plugins
 

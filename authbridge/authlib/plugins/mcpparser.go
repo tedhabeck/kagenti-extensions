@@ -24,8 +24,8 @@ func (p *MCPParser) Name() string { return "mcp-parser" }
 
 func (p *MCPParser) Capabilities() pipeline.PluginCapabilities {
 	return pipeline.PluginCapabilities{
-		Writes:     []string{"mcp"},
-		BodyAccess: true,
+		Writes:    []string{"mcp"},
+		ReadsBody: true,
 	}
 }
 

@@ -73,7 +73,9 @@ A stable identifier. Used for logs, metrics, `GetState`/`SetState` keys (by conv
 type PluginCapabilities struct {
     Reads      []string // extension slot names this plugin reads
     Writes     []string // extension slot names this plugin writes
-    BodyAccess bool     // whether this plugin needs request/response body buffered
+    ReadsBody  bool     // plugin reads pctx.Body / pctx.ResponseBody
+    WritesBody bool     // plugin mutates body via pctx.SetBody / pctx.SetResponseBody
+    BodyAccess bool     // deprecated: alias for ReadsBody (folded by Normalize)
 }
 ```
 
@@ -83,7 +85,9 @@ Declared once per plugin instance. `pipeline.New` validates that every `Read` is
 plugin "guardrail" reads slot "mcp" but no earlier plugin writes it
 ```
 
-`BodyAccess: true` on *any* plugin in a chain causes `Pipeline.NeedsBody()` to return true, which the **listener** uses to negotiate Envoy's `ProcessingMode` (BUFFERED vs HEADERS-only). Without this, the gRPC ext_proc server never asks for the body and parsers see `pctx.Body == nil`.
+`ReadsBody: true` (or the legacy `BodyAccess` alias) on *any* plugin in a chain causes `Pipeline.NeedsBody()` to return true, which the **listener** uses to negotiate Envoy's `ProcessingMode` (BUFFERED vs HEADERS-only). Without this, the gRPC ext_proc server never asks for the body and parsers see `pctx.Body == nil`.
+
+`WritesBody: true` declares that the plugin may rewrite the body via `pctx.SetBody` / `pctx.SetResponseBody`; the listener propagates the mutation to the wire. See §6, "Body mutation" for the full body-mutation contract (capability rules, ordering constraints, Content-Encoding policy).
 
 ### `OnRequest(ctx, pctx) Action`
 Called when a request is entering the pipeline. Plugins typically read request headers / body, mutate one or more extension slots, and return `Continue` or `Reject`.
@@ -126,6 +130,8 @@ type Context struct {
 **Ownership rules:**
 - Plugins **read** any field they declared in `Capabilities.Reads`.
 - Plugins **write** fields they declared in `Capabilities.Writes`. By convention each extension slot has exactly one writer (the parser plugin).
+- Plugins read `pctx.Body` / `pctx.ResponseBody` only if they declared `ReadsBody: true` (or the deprecated `BodyAccess: true`).
+- Plugins mutate body content via `pctx.SetBody(newBytes)` / `pctx.SetResponseBody(newBytes)`, and only if they declared `WritesBody: true`. Direct assignment (`pctx.Body = ...`) compiles but bypasses listener propagation and misses the Invocation + body-mutation event emission — see §6, "Body mutation."
 - `Claims` is populated by `jwt-validation` and is read-only afterward.
 - `Agent`, `Route`, `Session` are populated by the listener before `Run`. Plugins treat them as read-only.
 - `ResponseBody` appears between `Run` and `RunResponse` — plugins must not read it in `OnRequest`.
@@ -478,6 +484,44 @@ This tells the validator those slot names are legal, so a downstream plugin can 
 ### Concurrency model
 Always sequential. No priority / mode / fire-and-forget semantics yet. This is the 80% case for auth-and-parse pipelines; richer modes would require an executor layer above the current loop.
 
+### Body mutation
+
+A plugin that declares `WritesBody: true` may rewrite the request or response body. The framework owns the propagation to the wire; plugins only call `pctx.SetBody(newBytes)` / `pctx.SetResponseBody(newBytes)`.
+
+**Capability model.** Three booleans on `PluginCapabilities`:
+
+| Field | Meaning | Listener effect |
+|---|---|---|
+| `ReadsBody` | plugin reads `pctx.Body` / `pctx.ResponseBody` | buffers the body; plugin sees the bytes |
+| `WritesBody` | plugin may call `pctx.SetBody` / `pctx.SetResponseBody` | implies `ReadsBody`; propagates mutations |
+| `BodyAccess` (deprecated) | legacy alias for `ReadsBody` | folded by `Normalize()`, removed in a future release |
+
+`pipeline.New` enforces two rules at build time:
+
+1. **At most one `WritesBody` plugin per pipeline.** Multiple mutators would have ambiguous ordering semantics; the error names both plugins so an operator debugging pod logs knows which two to reconcile.
+2. **`WritesBody` cannot precede a `ReadsBody`-only plugin.** A reader expects to see the original bytes; putting a mutator before it would silently feed the reader the post-rewrite content.
+
+**Mutation helpers.** `SetBody` / `SetResponseBody` replace the byte slice and flip an internal `bodyMutated` / `responseBodyMutated` flag that listeners read via `pctx.BodyMutated()` / `pctx.ResponseBodyMutated()`. They also auto-emit:
+
+- A `modify`-action Invocation with `Reason: "body_rewritten"`, framework-attributed to the mutating plugin.
+- A plugin-public event under `pctx.Extensions.Custom["body-mutation" + PluginEventSuffix]` with the phase (`request` / `response`), plugin name, byte length before/after, and sha256 before/after. Never the raw body content — the session store is unauthenticated.
+
+The flags (not byte-compare) are the source of truth. A rewrite that produces byte-identical output still records the Invocation because "redactor ran, nothing matched" is valid telemetry.
+
+**Wire propagation (per listener).**
+
+| Listener | Request body | Response body |
+|---|---|---|
+| `extproc` | `withBodyMutation` helper wraps the `RequestBody ProcessingResponse` with an ext_proc `BodyMutation`. Envoy replaces the buffered body and recomputes `Content-Length`. | Same pattern in the response-body handler. |
+| `forwardproxy` | On mutation, rebuild `r.Body` from `pctx.Body`, set `r.ContentLength` + `Content-Length` header. | Replace `resp.Body` + `resp.ContentLength` + `Content-Length`. |
+| `reverseproxy` | Same as forwardproxy on the inbound request before handing to `httputil.ReverseProxy`. | Same as forwardproxy on the response from the upstream. |
+
+Every mutation path also **clears `Content-Encoding`**: the framework can't know whether the plugin decompressed a gzipped body before rewriting, so shipping plain bytes without the old encoding header beats shipping a malformed archive. Auto-decompress/recompress is a possible future feature, explicitly out of scope today.
+
+**Body-size limits.** Bodies over `maxBodySize` (1 MB) are rejected by the listener at buffer time — before the mutator sees anything. Plugins don't need to guard against oversized input.
+
+**Streaming.** Only buffered mutation is supported. Responses that stream (SSE, chunked bodies beyond the buffer cap) are not mutable today; a streaming-transform API is a separate project.
+
 ---
 
 ## 7. `Session` + `SessionEvent` — the observability side-channel
@@ -629,6 +673,7 @@ The plugin interface is **not** semver-stable yet (AuthBridge is pre-1.0). Chang
 - **`pctx.Record` helpers**: `Allow` / `Skip` / `Observe` / `Modify` / `Record` / `DenyAndRecord` on `Context`. Framework-managed attribution (`currentPlugin`, `currentPhase`, `Path`) fills Invocation fields automatically.
 - **Open plugin registry**: plugins self-register from `init()` via `plugins.RegisterPlugin`. Third-party plugins in external modules drop in via a side-effect import. Closed `registry` map literal removed.
 - **Config hot-reload**: new `pipeline.Holder` (atomic wrapper) + `authlib/reloader` package (fsnotify-driven). Listeners receive `*Holder` instead of `*Pipeline`; the reloader atomically swaps the holder's contents when the config file changes. `mode` and `listener.*` edits are refused (pod restart required); any other change is picked up within the kubelet sync window (~60s). See §9.
+- **Body mutation**: `PluginCapabilities.BodyAccess` split into `ReadsBody` / `WritesBody`. New `pctx.SetBody` / `pctx.SetResponseBody` helpers flip a mutation flag; all three listeners (extproc / forwardproxy / reverseproxy) propagate the rewrite to the upstream with correct `Content-Length` and cleared `Content-Encoding`. `BodyAccess` kept as deprecated alias. See §6, "Body mutation."
 
 Breaking changes will be announced in `authbridge/CHANGELOG.md` (TBD) before a 1.0 tag.
 
@@ -643,11 +688,11 @@ Breaking changes will be announced in `authbridge/CHANGELOG.md` (TBD) before a 1
 
 **Package sources:**
 
-- `pipeline.go` — `Pipeline` type, `New`, `Run`, `RunResponse`, `Start`, `Stop`, `Plugins`, `NeedsBody`.
+- `pipeline.go` — `Pipeline` type, `New`, `Run`, `RunResponse`, `Start`, `Stop`, `Plugins`, `NeedsBody`, `WritesBody`.
 - `holder.go` — `Holder`, the atomic slot listeners hold in place of a raw `*Pipeline`.
-- `plugin.go` — `Plugin` interface, `PluginCapabilities`, `Configurable`, `Initializer`, `Shutdowner`, `Readier`.
+- `plugin.go` — `Plugin` interface, `PluginCapabilities` (with `ReadsBody` / `WritesBody` / deprecated `BodyAccess` + `Normalize()`), `Configurable`, `Initializer`, `Shutdowner`, `Readier`.
 - `action.go` — `Action`, `ActionType`, `Violation`, helper constructors (`Deny`, `DenyStatus`, `DenyWithDetails`, `Challenge`, `RateLimited`), `StatusFromCode`.
-- `context.go` — `Context`, `Direction`, `AgentIdentity`, and the `pctx.Record` / `Allow` / `Skip` / `Observe` / `Modify` / `DenyAndRecord` helpers.
+- `context.go` — `Context`, `Direction`, `AgentIdentity`, the `pctx.Record` / `Allow` / `Skip` / `Observe` / `Modify` / `DenyAndRecord` helpers, and `pctx.SetBody` / `SetResponseBody` / `BodyMutated` / `ResponseBodyMutated` for body mutation.
 - `extensions.go` — `Extensions` struct, `Invocation`, `Invocations`, `InvocationAction`, named protocol extensions, `GetState` / `SetState`.
 - `session.go` — `SessionEvent`, `SessionView`, `SessionPhase`, marshalers.
 - `authlib/reloader/` — `Reloader`, `Status`, `PipelineBuilder`, `WithDrainWindow` / `WithDebounce` / `WithStartTimeout`, `Handler()` (serves `/reload/status`).

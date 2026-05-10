@@ -423,6 +423,69 @@ Graduate to a typed slot when ≥2 of these are true:
 Don't graduate speculatively — the map path has no cost if you stay
 in it.
 
+## Body mutation
+
+Plugins that need to rewrite request or response bodies declare
+`WritesBody: true` and call the `pctx.SetBody` / `pctx.SetResponseBody`
+helpers. The framework propagates the rewrite to the wire, emits a
+`modify`-action Invocation, and publishes a `body-mutation/event`
+entry in `pctx.Extensions.Custom` with length delta + sha256
+before/after (never the raw body).
+
+> For the full lifecycle — per-listener wire behavior, content-encoding
+> policy, ordering rules, body-size limits — see
+> [`framework-architecture.md` §6, "Body mutation"](./framework-architecture.md#body-mutation).
+> This section is the plugin-author field reference.
+
+### Capability fields
+
+```go
+type PluginCapabilities struct {
+    Reads      []string // extension slot names this plugin reads
+    Writes     []string // extension slot names this plugin writes
+    ReadsBody  bool     // plugin reads pctx.Body / pctx.ResponseBody
+    WritesBody bool     // plugin may call pctx.SetBody / pctx.SetResponseBody
+    BodyAccess bool     // DEPRECATED alias for ReadsBody; folded by Normalize()
+}
+```
+
+- `ReadsBody`: listener buffers the body; plugin sees bytes.
+- `WritesBody`: implies `ReadsBody`. Listener propagates `pctx.SetBody`
+  rewrites to the upstream (and `pctx.SetResponseBody` to the
+  downstream client).
+- `BodyAccess`: deprecated. `PluginCapabilities.Normalize()` folds it
+  into `ReadsBody` for one release of migration grace; new plugins
+  should never set it.
+
+### Build-time validation (enforced by `pipeline.New`)
+
+- At most **one** `WritesBody` plugin per pipeline. Two mutators in
+  the same direction would produce ambiguous ordering; `New` rejects
+  with an error naming both plugins.
+- A `WritesBody` plugin cannot precede a `ReadsBody`-only plugin. The
+  reader must see the original bytes.
+- Waypoint mode (ext_authz listener) cannot propagate body mutations —
+  the ext_authz API has no body-mutation field. Do not combine
+  `WritesBody: true` plugins with `mode: waypoint`.
+
+### Mutation helpers
+
+| Call | Effect |
+|---|---|
+| `pctx.SetBody(newBytes)` | Replace request body; flip `BodyMutated()` flag |
+| `pctx.SetResponseBody(newBytes)` | Replace response body; flip `ResponseBodyMutated()` flag |
+| `pctx.BodyMutated()` / `ResponseBodyMutated()` | Read by the listener to decide whether to emit a wire mutation. Plugins normally don't need these. |
+
+Direct assignment (`pctx.Body = newBytes`) still compiles but the
+listener won't propagate it, no Invocation fires, and the mutation
+event won't appear in the session stream. Always use `SetBody`.
+
+**NEVER log the raw body content.** The framework's
+`body-mutation/event` carries only length + sha256 on purpose — the
+session store is unauthenticated. Plugin-private debug logs may
+include body bytes at DEBUG level, but never publish them to the
+session stream or Custom map.
+
 ## Registering a plugin
 
 A plugin advertises itself to the pipeline builder through `RegisterPlugin`

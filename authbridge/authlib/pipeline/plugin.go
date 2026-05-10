@@ -10,13 +10,61 @@ type Plugin interface {
 	OnResponse(ctx context.Context, pctx *Context) Action
 }
 
-// PluginCapabilities declares what extension slots a plugin reads and writes.
-// The pipeline validates at startup that all reads are satisfied by an earlier
-// plugin's writes.
+// PluginCapabilities declares what extension slots a plugin reads and
+// writes, plus whether it accesses the request / response body.
+//
+// The pipeline validates at startup that all Reads are satisfied by an
+// earlier plugin's Writes. Body-access fields drive the listener's
+// body-buffering handshake (ext_proc ProcessingMode, net/http read-body).
 type PluginCapabilities struct {
-	Reads      []string // extension slot names this plugin reads
-	Writes     []string // extension slot names this plugin writes
-	BodyAccess bool     // whether this plugin needs request/response body buffered
+	// Reads / Writes name extension slots (A2A, MCP, Inference, Custom
+	// map keys). Checked at pipeline.New.
+	Reads  []string
+	Writes []string
+
+	// ReadsBody: the plugin reads pctx.Body in OnRequest and/or
+	// pctx.ResponseBody in OnResponse. The listener buffers the body
+	// when any plugin declares this; without it, pctx.Body is nil and
+	// a read silently sees "no body."
+	ReadsBody bool
+
+	// WritesBody: the plugin may mutate pctx.Body / pctx.ResponseBody
+	// (call pctx.SetBody / pctx.SetResponseBody). Implies ReadsBody —
+	// Normalize() auto-promotes. Listener propagates the mutation to
+	// the wire (ext_proc BodyMutation, or the outbound http.Request /
+	// downstream http.Response for proxy listeners).
+	//
+	// Pipeline.New rejects a pipeline that has more than one WritesBody
+	// plugin per direction — mutation ordering would be ambiguous.
+	// Waypoint mode (ext_authz) cannot support WritesBody at all:
+	// ext_authz has no body-mutation field. main.go enforces this at
+	// process boot.
+	WritesBody bool
+
+	// BodyAccess is a deprecated alias for ReadsBody, kept so existing
+	// plugins compile unchanged through one release. Normalize() folds
+	// BodyAccess into ReadsBody before validation and listener
+	// negotiation read the normalized fields.
+	//
+	// Deprecated: use ReadsBody. Will be removed in a future release.
+	BodyAccess bool
+}
+
+// Normalize applies compatibility rules to a PluginCapabilities:
+//   - BodyAccess (deprecated) is folded into ReadsBody.
+//   - WritesBody implies ReadsBody (you can't mutate what you didn't see).
+//
+// Called by Pipeline.New for every plugin's declared capabilities so the
+// rest of the framework reads a normalized form. Plugins never need to
+// call this themselves.
+func (c PluginCapabilities) Normalize() PluginCapabilities {
+	if c.BodyAccess {
+		c.ReadsBody = true
+	}
+	if c.WritesBody {
+		c.ReadsBody = true
+	}
+	return c
 }
 
 // Initializer is an optional interface a plugin may implement when it

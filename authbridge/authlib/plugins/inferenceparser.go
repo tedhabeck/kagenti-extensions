@@ -24,8 +24,8 @@ func (p *InferenceParser) Name() string { return "inference-parser" }
 
 func (p *InferenceParser) Capabilities() pipeline.PluginCapabilities {
 	return pipeline.PluginCapabilities{
-		Writes:     []string{"inference"},
-		BodyAccess: true,
+		Writes:    []string{"inference"},
+		ReadsBody: true,
 	}
 }
 
@@ -192,8 +192,8 @@ type inferenceChoice struct {
 // Unmarshaler) because responses only carry plain-string content + an
 // optional tool_calls array.
 type inferenceRespMessage struct {
-	Role      string                 `json:"role"`
-	Content   string                 `json:"content"`
+	Role      string                  `json:"role"`
+	Content   string                  `json:"content"`
 	ToolCalls []inferenceRespToolCall `json:"tool_calls"`
 }
 

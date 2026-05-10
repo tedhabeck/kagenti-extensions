@@ -24,8 +24,8 @@ func (p *A2AParser) Name() string { return "a2a-parser" }
 
 func (p *A2AParser) Capabilities() pipeline.PluginCapabilities {
 	return pipeline.PluginCapabilities{
-		Writes:     []string{"a2a"},
-		BodyAccess: true,
+		Writes:    []string{"a2a"},
+		ReadsBody: true,
 	}
 }
 

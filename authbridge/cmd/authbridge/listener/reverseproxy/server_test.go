@@ -3,6 +3,7 @@ package reverseproxy
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -123,6 +124,79 @@ func (p *bodyRecorderPlugin) OnRequest(_ context.Context, pctx *pipeline.Context
 }
 func (p *bodyRecorderPlugin) OnResponse(_ context.Context, _ *pipeline.Context) pipeline.Action {
 	return pipeline.Action{Type: pipeline.Continue}
+}
+
+// bodyMutatorPlugin declares WritesBody and rewrites the request body
+// to a fixed payload. The pipeline validator requires WritesBody run
+// after any ReadsBody plugin, which this satisfies by itself (no reader
+// present when used alone).
+type bodyMutatorPlugin struct {
+	newBody []byte
+}
+
+func (p *bodyMutatorPlugin) Name() string { return "body-mutator" }
+func (p *bodyMutatorPlugin) Capabilities() pipeline.PluginCapabilities {
+	return pipeline.PluginCapabilities{WritesBody: true}
+}
+func (p *bodyMutatorPlugin) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
+	pctx.SetBody(p.newBody)
+	return pipeline.Action{Type: pipeline.Continue}
+}
+func (p *bodyMutatorPlugin) OnResponse(_ context.Context, _ *pipeline.Context) pipeline.Action {
+	return pipeline.Action{Type: pipeline.Continue}
+}
+
+// TestReverseProxy_RequestBodyMutation: a WritesBody plugin that
+// rewrites pctx.Body via SetBody must cause the upstream backend to
+// receive the new bytes with a correct Content-Length header. Confirms
+// that the reverseproxy request-path propagation is wired to the
+// BodyMutated flag.
+func TestReverseProxy_RequestBodyMutation(t *testing.T) {
+	newBody := `{"sanitized":"payload"}`
+	var (
+		gotBody   []byte
+		gotLength string
+		gotEnc    string
+	)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		gotLength = r.Header.Get("Content-Length")
+		gotEnc = r.Header.Get("Content-Encoding")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	mutator := &bodyMutatorPlugin{newBody: []byte(newBody)}
+	p, err := pipeline.New([]pipeline.Plugin{mutator})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := NewServer(pipeline.NewHolder(p), nil, backend.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httptest.NewServer(srv.Handler())
+	defer proxy.Close()
+
+	orig := `{"original":"prompt"}`
+	req, _ := http.NewRequest("POST", proxy.URL+"/agent", strings.NewReader(orig))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Encoding", "gzip") // plugin may have decompressed; listener clears
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if string(gotBody) != newBody {
+		t.Errorf("backend got body = %q, want %q (listener did not propagate mutation)", gotBody, newBody)
+	}
+	if gotLength != "23" { // len(`{"sanitized":"payload"}`)
+		t.Errorf("Content-Length = %q, want 23 (mutation rewrite)", gotLength)
+	}
+	if gotEnc != "" {
+		t.Errorf("Content-Encoding = %q, want empty (listener should clear on mutation)", gotEnc)
+	}
 }
 
 func TestReverseProxy_BodyBuffering(t *testing.T) {

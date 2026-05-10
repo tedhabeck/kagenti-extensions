@@ -110,6 +110,16 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		r.Header.Set("Authorization", "Bearer "+extractBearer(newAuth))
 	}
 
+	// If a WritesBody plugin rewrote pctx.Body, ship the new bytes
+	// upstream and clear Content-Encoding (see forwardproxy response
+	// path for the rationale).
+	if pctx.BodyMutated() {
+		r.Body = io.NopCloser(bytes.NewReader(pctx.Body))
+		r.ContentLength = int64(len(pctx.Body))
+		r.Header.Set("Content-Length", fmt.Sprintf("%d", len(pctx.Body)))
+		r.Header.Del("Content-Encoding")
+	}
+
 	// Remove hop-by-hop headers
 	r.Header.Del("Connection")
 	r.Header.Del("Keep-Alive")
@@ -157,11 +167,16 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// If a plugin mutated ResponseBody, use the mutated version.
-	if s.OutboundPipeline.NeedsBody() && pctx.ResponseBody != nil {
+	// A plugin that called pctx.SetResponseBody flipped the mutation flag.
+	// Use the replaced bytes and rewrite Content-Length so the downstream
+	// client gets a consistent response. Content-Encoding is cleared
+	// because the framework can't know if the plugin also decompressed;
+	// safer to ship plain bytes than a broken archive.
+	if pctx.ResponseBodyMutated() {
 		resp.Body = io.NopCloser(bytes.NewReader(pctx.ResponseBody))
 		resp.ContentLength = int64(len(pctx.ResponseBody))
 		resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(pctx.ResponseBody)))
+		resp.Header.Del("Content-Encoding")
 	}
 
 	if s.Sessions != nil {
