@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"encoding/json"
+	"log/slog"
 
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/contracts"
 )
@@ -57,8 +58,12 @@ func (e *A2AExtension) Fragments() []contracts.Fragment {
 
 // normalizeA2ARole rewrites A2A's native role vocabulary to match the
 // Inference / OpenAI-style vocabulary. Keeping guardrails to a single
-// role set across protocols is worth the small loss of A2A fidelity —
-// callers that need the raw value read *A2AExtension.Role directly.
+// role set across protocols is worth the small loss of A2A fidelity.
+// A2A-aware consumers may type-assert to *A2AExtension to read the
+// raw Role field directly; framework-generic guardrails consuming via
+// the ContentSource interface treat the normalized value as
+// authoritative (the interface deliberately does not surface the raw
+// value).
 func normalizeA2ARole(r string) string {
 	switch r {
 	case "agent":
@@ -136,7 +141,10 @@ func (e *InferenceExtension) Fragments() []contracts.Fragment {
 	if e == nil {
 		return nil
 	}
-	out := make([]contracts.Fragment, 0, len(e.Messages)+1+2*len(e.ToolCalls))
+	// Use a nil slice so an empty result returns nil, consistent with
+	// A2AExtension.Fragments and MCPExtension.Fragments — append
+	// tolerates nil and the cap hint isn't measurable on this path.
+	var out []contracts.Fragment
 
 	for _, m := range e.Messages {
 		if m.Content == "" {
@@ -161,17 +169,20 @@ func (e *InferenceExtension) Fragments() []contracts.Fragment {
 		}
 	}
 
-	if len(out) == 0 {
-		return nil
-	}
 	return out
 }
 
 // stringifyAny renders an arbitrary argument value as a string suitable
-// for text scanning. Strings pass through unchanged; anything else
-// goes through JSON so nested maps / slices become flat inspectable
-// text. A marshal error (should be rare for JSON-origin data) yields
-// empty string, which the caller filters.
+// for text scanning. Strings pass through unchanged; anything else goes
+// through JSON so nested maps / slices become flat inspectable text.
+//
+// Precondition: v should be JSON-origin data (values that came out of
+// json.Unmarshal into map[string]any / []any / primitives). Those
+// round-trip through json.Marshal without error in practice. Values
+// with unmarshalable types (channels, funcs, cyclic refs) will hit the
+// error path — the function returns "" and logs at DEBUG so the skip
+// is observable in verbose runs rather than silent. Callers filter
+// empty strings regardless.
 func stringifyAny(v any) string {
 	if v == nil {
 		return ""
@@ -181,6 +192,8 @@ func stringifyAny(v any) string {
 	}
 	b, err := json.Marshal(v)
 	if err != nil {
+		slog.Debug("pipeline/content: stringifyAny marshal error, returning empty",
+			"error", err)
 		return ""
 	}
 	return string(b)

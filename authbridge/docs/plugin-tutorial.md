@@ -330,6 +330,14 @@ func (e *MyExtension) Fragments() []contracts.Fragment {
 That's the whole addition. Guardrails call `pctx.ContentSources()`,
 iterate, and see your messages alongside every other parser's output.
 
+**Role normalization.** The minimal example above emits `m.Role` as-is.
+If your protocol uses role names that differ from the standard vocabulary
+(e.g., A2A uses `"agent"` where the standard is `"assistant"`), remap
+them to the `contracts.Role*` constants inside `Fragments` so guardrails
+match uniformly across protocols. See
+[`A2AExtension.Fragments`](../authlib/pipeline/content.go) for a reference
+implementation that rewrites `"agent"` → `"assistant"`.
+
 Skip this step if your protocol is binary, control-plane only, or
 otherwise carries no text a guardrail would scan.
 

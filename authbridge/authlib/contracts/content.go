@@ -43,6 +43,16 @@ type ContentSource interface {
 
 // Fragment is one inspectable piece of text, tagged with the role that
 // produced it.
+//
+// The struct may grow additional fields in future versions (e.g., a
+// Path locator for violation citations, or a Kind hint for
+// format-aware scanners). Use **named-field initialization** when
+// constructing literals — `Fragment{Role: ..., Text: ...}` rather
+// than `Fragment{"user", "..."}` — so existing call sites and tests
+// remain unaffected when fields are added. Tests that compare
+// `[]Fragment` literals with reflect.DeepEqual should likewise rely
+// on named fields so new zero-valued fields compare equal without
+// test churn.
 type Fragment struct {
 	// Role identifies who produced the text. Use the standard values
 	// below when the semantic fit is clear; protocols that don't fit
