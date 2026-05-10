@@ -306,20 +306,15 @@ at least one.
 
 ```go
 type Invocation struct {
-    Plugin           string           // plugin.Name(); framework-filled
-    Action           InvocationAction // 5-value: allow | deny | skip | modify | observe
-    Phase            InvocationPhase  // "request" | "response"; framework-filled
-    Reason           string           // machine-stable code
-    Path             string           // request path; framework-filled
+    Plugin  string           // plugin.Name(); framework-filled
+    Action  InvocationAction // 5-value: allow | deny | skip | modify | observe
+    Phase   InvocationPhase  // "request" | "response"; framework-filled
+    Reason  string           // machine-stable code
+    Path    string           // request path; framework-filled
 
-    // Optional diagnostic fields; populated selectively:
-    ExpectedIssuer, ExpectedAudience string
-    TokenSubject                     string
-    TokenAudience, TokenScopes       []string
-    RouteMatched                     bool
-    RouteHost, TargetAudience        string
-    RequestedScopes                  []string
-    CacheHit                         bool
+    // Plugin-specific diagnostic context. Opaque to the framework;
+    // abctl renders as key=value rows in the detail pane.
+    Details map[string]string
 }
 ```
 
@@ -345,18 +340,27 @@ discriminates within an Action value. abctl filters can match
 either — `/skip` shows every skip action regardless of reason;
 `/path_bypass` narrows to that specific skip flavour.
 
-**Which diagnostic fields to populate:**
+**What to put in Details:**
 
-- Auth gates (jwt-validation and kin): `ExpectedIssuer`,
-  `ExpectedAudience`, `TokenSubject`, `TokenAudience`, `TokenScopes`.
-- Outbound routers (token-exchange and kin): `RouteMatched`,
-  `RouteHost`, `TargetAudience`, `RequestedScopes`, `CacheHit`.
-- Parsers: usually none — their semantic payload lives on the typed
-  extension slot (A2A / MCP / Inference). Emit with just Action +
-  Reason.
+Suggested key conventions used by built-in plugins (operators
+already know these; abctl filters match substring on both key and
+value):
 
-**NEVER put raw tokens, signatures, or secrets in an Invocation.**
-The session store has no auth.
+- Auth gates (jwt-validation): `expected_issuer`, `expected_audience`,
+  `token_subject`, `token_audience`, `token_scopes`.
+- Outbound routers (token-exchange): `route_matched` (`"true"`/`"false"`),
+  `route_host`, `target_audience`, `requested_scopes`, `cache_hit`.
+- Parsers: usually no Details — their semantic payload lives on the
+  typed extension slot (A2A / MCP / Inference). Emit with just
+  Action + Reason.
+- Third-party plugins: pick snake_case keys scoped to your semantic
+  domain (`tokens_remaining`, `quota_bucket`, `redaction_count`, etc.).
+  Stringify booleans as `"true"`/`"false"`; stringify `[]string` as
+  space-joined (OAuth scope convention).
+
+**NEVER put raw tokens, signatures, or client credentials in
+`Details`.** The session store has no auth on it; only safe-to-log data
+belongs in Invocations.
 
 ### 2. Named protocol extension (optional, for parsers)
 

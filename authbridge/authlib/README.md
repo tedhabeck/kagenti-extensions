@@ -4,21 +4,30 @@ A pure Go library providing reusable building blocks for JWT validation, OAuth 2
 
 ## Packages
 
+**Shared building blocks** (used by ≥2 plugins or the framework):
+
 | Package | Purpose |
 |---------|---------|
-| `validation/` | JWKS-backed JWT verifier (`lestrrat-go/jwx`) with required audience parameter |
-| `exchange/` | RFC 8693 token exchange + client credentials grant with pluggable auth |
-| `cache/` | SHA-256 keyed token cache with TTL eviction |
-| `bypass/` | Path pattern matcher for public endpoints (health, agent card) |
-| `spiffe/` | SPIFFE credential sources (file-based JWT-SVID) |
-| `routing/` | Host-to-audience router with glob pattern matching |
-| `auth/` | Composition layer: `HandleInbound` + `HandleOutbound` — used internally by `jwt-validation` and `token-exchange` plugins |
+| `bypass/` | Path pattern matcher for public endpoints (health, agent card). Any inbound gate plugin (jwt-validation, SAML, mTLS) can use it. |
+| `routing/` | Host-to-audience router with glob pattern matching. Used by token-exchange; future routed plugins are expected to reuse it. |
+| `auth/` | Composition layer: `HandleInbound` + `HandleOutbound` — used internally by the `jwt-validation` and `token-exchange` plugins. Lingering in authlib/ for now; plugin-internal in practice. |
 | `config/` | YAML config loader, mode presets, credential-file waiters, top-level validation |
 | `pipeline/` | Plugin pipeline + lifecycle (`Configurable`, `Initializer`, `Shutdowner`) — see [docs/framework-architecture.md](../docs/framework-architecture.md) |
 | `session/` | In-memory session store + `SessionSummary` aggregation, backing the `:9094` API |
 | `sessionapi/` | HTTP API (`/v1/sessions`, `/v1/events` SSE, `/v1/pipeline`) exposing the session store |
-| `plugins/` | Built-in plugins: `jwt-validation`, `token-exchange`, `a2a-parser`, `mcp-parser`, `inference-parser`. See [docs/plugin-reference.md](../docs/plugin-reference.md) for the per-plugin config convention |
-| `observe/` | OTEL + metrics helpers |
+| `reloader/` | fsnotify-based config hot-reload — atomic pipeline swap on ConfigMap change |
+| `observe/` | `/stats`, `/config`, `/reload/status` HTTP server |
+
+**Plugins and their internals**:
+
+| Package | Purpose |
+|---------|---------|
+| `plugins/` | Registry + parser plugins (a2a-parser, mcp-parser, inference-parser) + shared `Build` + `StatsSource` contract |
+| `plugins/jwtvalidation/` | The `jwt-validation` plugin. Owns `plugins/jwtvalidation/validation/` (JWKS-backed JWT verifier). |
+| `plugins/tokenexchange/` | The `token-exchange` plugin. Owns `plugins/tokenexchange/exchange/` (RFC 8693 client), `plugins/tokenexchange/cache/` (token TTL cache), `plugins/tokenexchange/spiffe/` (JWT-SVID file source). |
+| `plugins/plugintesting/` | Test helpers — stubs of jwt-validation / token-exchange that skip file IO, for listener-level tests. |
+
+Packages that used to live at `authlib/validation`, `authlib/exchange`, `authlib/cache`, `authlib/spiffe` moved under their owning plugin. They had no reuse outside that plugin; keeping them at `authlib/` top-level implied wider usefulness than reality. New plugins should follow the same pattern: if the package is plugin-internal, colocate it under `plugins/<plugin>/`.
 
 ## Usage
 

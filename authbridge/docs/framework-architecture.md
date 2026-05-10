@@ -113,10 +113,9 @@ type Context struct {
     Body      []byte           // nil unless a plugin declared BodyAccess: true
     StartedAt time.Time        // listener wall-clock at request entry
 
-    Agent   *AgentIdentity     // this workload's SPIFFE / Keycloak identity
-    Claims  *validation.Claims // inbound caller's JWT claims after jwt-validation
-    Route   *routing.ResolvedRoute // outbound: resolved audience / token scopes
-    Session *SessionView      // read-only view of the session bucket
+    Agent    *AgentIdentity   // this workload's SPIFFE / Keycloak identity
+    Identity Identity          // caller identity after an auth plugin runs (interface)
+    Session  *SessionView      // read-only view of the session bucket
 
     // Response-phase fields (populated by listener before RunResponse)
     StatusCode      int
@@ -132,8 +131,8 @@ type Context struct {
 - Plugins **write** fields they declared in `Capabilities.Writes`. By convention each extension slot has exactly one writer (the parser plugin).
 - Plugins read `pctx.Body` / `pctx.ResponseBody` only if they declared `ReadsBody: true` (or the deprecated `BodyAccess: true`).
 - Plugins mutate body content via `pctx.SetBody(newBytes)` / `pctx.SetResponseBody(newBytes)`, and only if they declared `WritesBody: true`. Direct assignment (`pctx.Body = ...`) compiles but bypasses listener propagation and misses the Invocation + body-mutation event emission — see §6, "Body mutation."
-- `Claims` is populated by `jwt-validation` and is read-only afterward.
-- `Agent`, `Route`, `Session` are populated by the listener before `Run`. Plugins treat them as read-only.
+- `Identity` is populated by whichever auth plugin ran (jwt-validation ships a `claimsIdentity` adapter around `validation.Claims`; a SAML / mTLS / custom plugin publishes its own adapter). The framework reads it through the `Identity` interface (`Subject()` / `ClientID()` / `Scopes()`) so no plugin-specific type leaks into `pipeline/`.
+- `Agent`, `Session` are populated by the listener before `Run`. Plugins treat them as read-only.
 - `ResponseBody` appears between `Run` and `RunResponse` — plugins must not read it in `OnRequest`.
 
 **Framework-owned attribution.** `pipeline.Run` / `RunResponse` stamp the currently-dispatching plugin's name and phase onto unexported fields of `pctx` around each plugin call. These drive the `pctx.Record` family of helpers so Invocation entries are auto-attributed without plugin-side ceremony. Plugins can't set them directly (unexported); exported `SetCurrentPlugin` / `ClearCurrentPlugin` exist for test harnesses that invoke plugins outside a `Pipeline.Run` dispatch loop.
@@ -146,9 +145,12 @@ pctx.Skip("path_bypass")                          // plugin ran but didn't act
 pctx.Observe("matched_tools/call")                // parser extracted data
 pctx.Modify("token_replaced")                     // plugin mutated the message
 pctx.Record(pipeline.Invocation{                  // full form with diagnostic fields
-    Action:       pipeline.ActionDeny,
-    Reason:       "jwt_failed",
-    ExpectedIssuer: issuer,
+    Action: pipeline.ActionDeny,
+    Reason: "jwt_failed",
+    Details: map[string]string{
+        "expected_issuer":   issuer,
+        "expected_audience": audience,
+    },
 })
 return pctx.DenyAndRecord(reason, code, message)  // emit + reject in one call
 ```
@@ -181,20 +183,19 @@ Every plugin that runs on a pipeline pass appends at least one `Invocation` to t
 
 ```go
 type Invocation struct {
-    Plugin           string           // plugin.Name(); framework-filled
-    Action           InvocationAction // 5-value: allow | deny | skip | modify | observe
-    Phase            InvocationPhase  // "request" | "response"; framework-filled
-    Reason           string           // machine-stable code, e.g. "path_bypass"
-    Path             string           // request path; framework-filled
+    Plugin  string           // plugin.Name(); framework-filled
+    Action  InvocationAction // 5-value: allow | deny | skip | modify | observe
+    Phase   InvocationPhase  // "request" | "response"; framework-filled
+    Reason  string           // machine-stable code, e.g. "path_bypass"
+    Path    string           // request path; framework-filled
 
-    // Optional diagnostic fields (populated selectively):
-    ExpectedIssuer, ExpectedAudience string
-    TokenSubject                     string
-    TokenAudience, TokenScopes       []string
-    RouteMatched                     bool
-    RouteHost, TargetAudience        string
-    RequestedScopes                  []string
-    CacheHit                         bool
+    // Plugin-specific diagnostic context. Opaque to the framework;
+    // rendered as key=value rows by abctl. Built-in plugins populate
+    // expected_issuer, token_subject, route_host, target_audience,
+    // cache_hit (snake_case). Third-party plugins define their own
+    // key space. Stringify booleans as "true"/"false" and []string
+    // as space-joined to match OAuth scope conventions.
+    Details map[string]string
 }
 
 type Invocations struct {
@@ -534,17 +535,16 @@ type SessionEvent struct {
     At             time.Time
     Direction      Direction                  // inbound | outbound
     Phase          SessionPhase               // request | response | denied
-    A2A            *A2AExtension              // snapshot of pctx.Extensions.A2A
-    MCP            *MCPExtension
-    Inference      *InferenceExtension
-    Invocations    *Invocations               // per-plugin action records, filtered by phase
-    Plugins        map[string]json.RawMessage // plugin-public events (escape-hatch /event suffix)
-    Identity       *EventIdentity             // Subject, ClientID, AgentID, Scopes
-    StatusCode     int                        // response phase only
-    Error          *EventError                // populated on 4xx/5xx
-    Host           string                     // :authority
-    TargetAudience string                     // outbound: resolved OAuth audience
-    Duration       time.Duration              // response: wall-clock since request entry
+    A2A         *A2AExtension              // snapshot of pctx.Extensions.A2A
+    MCP         *MCPExtension
+    Inference   *InferenceExtension
+    Invocations *Invocations               // per-plugin action records, filtered by phase
+    Plugins     map[string]json.RawMessage // plugin-public events (escape-hatch /event suffix)
+    Identity    *EventIdentity             // Subject, ClientID, AgentID, Scopes
+    StatusCode  int                        // response phase only
+    Error       *EventError                // populated on 4xx/5xx
+    Host        string                     // :authority
+    Duration    time.Duration              // response: wall-clock since request entry
 }
 ```
 
@@ -674,6 +674,8 @@ The plugin interface is **not** semver-stable yet (AuthBridge is pre-1.0). Chang
 - **Open plugin registry**: plugins self-register from `init()` via `plugins.RegisterPlugin`. Third-party plugins in external modules drop in via a side-effect import. Closed `registry` map literal removed.
 - **Config hot-reload**: new `pipeline.Holder` (atomic wrapper) + `authlib/reloader` package (fsnotify-driven). Listeners receive `*Holder` instead of `*Pipeline`; the reloader atomically swaps the holder's contents when the config file changes. `mode` and `listener.*` edits are refused (pod restart required); any other change is picked up within the kubelet sync window (~60s). See §9.
 - **Body mutation**: `PluginCapabilities.BodyAccess` split into `ReadsBody` / `WritesBody`. New `pctx.SetBody` / `pctx.SetResponseBody` helpers flip a mutation flag; all three listeners (extproc / forwardproxy / reverseproxy) propagate the rewrite to the upstream with correct `Content-Length` and cleared `Content-Encoding`. `BodyAccess` kept as deprecated alias. See §6, "Body mutation."
+- **Detyped framework**: `pipeline/` no longer imports plugin-specific packages. **Breaking**: `Context.Claims *validation.Claims` → `Context.Identity Identity` (interface with `Subject()`/`ClientID()`/`Scopes()`); plugins publish adapters. `Context.Route` removed (was dead code). `Invocation`'s nine jwt-validation + token-exchange specific fields (`ExpectedIssuer`, `TokenSubject`, `RouteHost`, `CacheHit`, etc.) collapsed into `Details map[string]string`; built-in plugins migrated to `Details["expected_issuer"]` etc. `SessionEvent.TargetAudience` removed (was only populated from dead `pctx.Route`). Third-party plugins get a clean diagnostic slot they can populate without framework edits.
+- **Single-owner packages relocated**: `authlib/validation` → `authlib/plugins/jwtvalidation/validation`. `authlib/exchange` / `authlib/cache` / `authlib/spiffe` → `authlib/plugins/tokenexchange/{exchange,cache,spiffe}`. Each plugin now lives in its own directory (`plugins/jwtvalidation/plugin.go`, `plugins/tokenexchange/plugin.go`) and self-registers via its own init(). `authlib/bypass`, `authlib/routing`, `authlib/auth` stay shared.
 
 Breaking changes will be announced in `authbridge/CHANGELOG.md` (TBD) before a 1.0 tag.
 

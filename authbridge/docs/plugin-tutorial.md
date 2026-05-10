@@ -86,14 +86,17 @@ pctx.Observe("matched_tools/call") // parser extracted data
 pctx.Modify("token_replaced")      // plugin mutated the message
 ```
 
-For invocations that carry extra diagnostic context, use `Record`:
+For invocations that carry extra diagnostic context, populate
+`Invocation.Details`:
 
 ```go
 pctx.Record(pipeline.Invocation{
-	Action:        pipeline.ActionAllow,
-	Reason:        "authorized",
-	TokenSubject:  claims.Subject,
-	TokenScopes:   claims.Scopes,
+	Action: pipeline.ActionAllow,
+	Reason: "authorized",
+	Details: map[string]string{
+		"token_subject": claims.Subject,
+		"token_scopes":  strings.Join(claims.Scopes, " "),
+	},
 })
 ```
 
