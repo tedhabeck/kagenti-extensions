@@ -23,14 +23,43 @@ type StatServer struct {
 // should be cheap (a few map copies).
 type StatsProvider func() *auth.Stats
 
-// NewStatServer builds the stat HTTP server. The statsProvider is
-// invoked per /stats request so per-plugin counters can be aggregated
-// live rather than captured at process start.
-func NewStatServer(addr string, config *config.Config, statsProvider StatsProvider) *StatServer {
+// ConfigProvider returns the currently-active *config.Config per
+// /config request. Used so the endpoint reflects a hot-reload swap
+// performed by authlib/reloader; for setups without hot-reload the
+// host just wraps a captured pointer (`func() *Config { return cfg }`).
+type ConfigProvider func() *config.Config
+
+// Option configures a StatServer at construction time.
+type Option func(*statServerOpts)
+
+type statServerOpts struct {
+	reloadStatus http.Handler
+}
+
+// WithReloadStatus registers a /reload/status handler (typically the
+// Handler returned by an authlib/reloader.Reloader). Omit when hot-
+// reload isn't wired up — the endpoint simply won't exist.
+func WithReloadStatus(h http.Handler) Option {
+	return func(o *statServerOpts) { o.reloadStatus = h }
+}
+
+// NewStatServer builds the stat HTTP server. configProvider is
+// invoked per /config request and statsProvider per /stats request,
+// so both reflect current state rather than a snapshot captured at
+// construction.
+func NewStatServer(addr string, configProvider ConfigProvider, statsProvider StatsProvider, opts ...Option) *StatServer {
+	var o statServerOpts
+	for _, opt := range opts {
+		opt(&o)
+	}
+
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/config", handleConfigFactory(config))
+	mux.HandleFunc("/config", handleConfigFactory(configProvider))
 	mux.HandleFunc("/stats", handleStatsFactory(statsProvider))
+	if o.reloadStatus != nil {
+		mux.Handle("/reload/status", o.reloadStatus)
+	}
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -41,6 +70,7 @@ func NewStatServer(addr string, config *config.Config, statsProvider StatsProvid
     <ul>
     <li><a href="/config">Kagenti AuthBridge configuration</a></li>
     <li><a href="/stats">Kagenti AuthBridge statistics</a></li>
+    <li><a href="/reload/status">Config reload status</a></li>
     </ul>
   </body>
 </html>`)
@@ -55,7 +85,7 @@ func NewStatServer(addr string, config *config.Config, statsProvider StatsProvid
 	}
 }
 
-func handleConfigFactory(cfg *config.Config) func(http.ResponseWriter, *http.Request) {
+func handleConfigFactory(provider ConfigProvider) func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		// Plugin config subtrees are captured verbatim as json.RawMessage
@@ -65,7 +95,7 @@ func handleConfigFactory(cfg *config.Config) func(http.ResponseWriter, *http.Req
 		// so we render the config as-is. If a plugin ever needs to
 		// suppress a known-sensitive field here, it can be added to a
 		// redaction pass in a follow-up.
-		err := json.NewEncoder(w).Encode(cfg)
+		err := json.NewEncoder(w).Encode(provider())
 		if err != nil {
 			slog.Default().Info("Failed to send configuration", "err", err)
 		}

@@ -289,7 +289,7 @@ kubectl apply -f k8s/auth-target-deployment-webhook.yaml     # Target service
 | 15123 | Envoy | TCP | Outbound listener (iptables redirects app traffic here) |
 | 15124 | Envoy | TCP | Inbound listener (iptables redirects incoming traffic here) |
 | 9090 | authbridge | gRPC | Ext-proc server (called by Envoy) |
-| 9093 | authbridge | HTTP | Stats + config inspection (`/stats`, `/config`) |
+| 9093 | authbridge | HTTP | Stats + config inspection (`/stats`, `/config`, `/reload/status`) |
 | 9094 | authbridge | HTTP | Session events API (JSON snapshots + SSE stream) |
 | 9901 | Envoy | HTTP | Admin interface (bound to 127.0.0.1) |
 | 8080 | auth-proxy | HTTP | Example app (NOT part of sidecar) |
@@ -366,6 +366,27 @@ Rejected requests (401 / 503) land as `phase: "denied"` events in `/v1/sessions`
 ### Disabling
 
 Set `session.enabled: false` in the runtime config to turn off the store (and implicitly the API). Setting `listener.session_api_addr: ""` alone is not currently supported as a selective disable — the preset refills it; if you need store-on-API-off, raise an issue.
+
+## Config Hot-Reload (`:9093/reload/status`)
+
+The authbridge binary watches its config file (`/etc/authbridge/config.yaml`) via `authlib/reloader`. When the ConfigMap changes, kubelet syncs the new content into the mount (~60s), the watcher detects it, and the binary rebuilds + atomically swaps the plugin pipelines without a pod restart. In-flight requests finish on the previous pipeline; new requests go to the new one.
+
+**What reloads:** any plugin list change (add/remove/reorder) and any plugin `config:` subtree edit.
+
+**What doesn't reload (pod restart required):** `mode`, any `listener.*` address, and the session store parameters (`session.ttl`, `session.max_events`, `session.max_sessions`).
+
+**Bad YAML stays safe:** if Load/Validate/Build/Start fails, the active pipeline keeps serving and the error is exposed on `/reload/status` with `reloads_failed` incremented. The pod never goes unhealthy from a bad edit.
+
+Operator workflow:
+
+```sh
+kubectl edit configmap authbridge-config-<agent> -n <ns>
+kubectl port-forward -n <ns> deploy/<agent> 9093:9093 &
+curl http://localhost:9093/reload/status  # last_success, reloads_ok, active_config_sha256
+curl http://localhost:9093/config         # now-active config (ConfigProvider closure)
+```
+
+See [`docs/framework-architecture.md`](docs/framework-architecture.md#9-config-hot-reload) §9 for the reload lifecycle, debounce / symlink-swap handling, and the drain-window behavior.
 
 ## Code Conventions
 

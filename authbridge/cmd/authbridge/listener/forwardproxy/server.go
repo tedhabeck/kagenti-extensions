@@ -19,14 +19,18 @@ import (
 const maxBodySize = 1 << 20 // 1MB — matches Envoy's default per_stream_buffer_limit_bytes
 
 // Server is an HTTP forward proxy that performs token exchange on outbound requests.
+//
+// OutboundPipeline is a holder so the bound pipeline can be hot-swapped
+// under the running listener; each handleRequest Loads through it so
+// in-flight requests finish on the pipeline they started with.
 type Server struct {
-	OutboundPipeline *pipeline.Pipeline
+	OutboundPipeline *pipeline.Holder
 	Sessions         *session.Store // nil when session tracking is disabled
 	Client           *http.Client
 }
 
 // NewServer creates a forward proxy server with a default HTTP client.
-func NewServer(outbound *pipeline.Pipeline, sessions *session.Store) *Server {
+func NewServer(outbound *pipeline.Holder, sessions *session.Store) *Server {
 	return &Server{
 		OutboundPipeline: outbound,
 		Sessions:         sessions,

@@ -27,11 +27,15 @@ import (
 const defaultHeartbeatInterval = 30 * time.Second
 
 // Server wraps an http.Server bound to a session store.
+//
+// inbound / outbound are holders (not raw pipelines) so a pipeline
+// hot-swap under the running server is reflected in the next
+// GET /v1/pipeline response without restarting.
 type Server struct {
 	server    *http.Server
 	store     *session.Store
-	inbound   *pipeline.Pipeline
-	outbound  *pipeline.Pipeline
+	inbound   *pipeline.Holder
+	outbound  *pipeline.Holder
 	heartbeat time.Duration
 }
 
@@ -44,10 +48,10 @@ func WithHeartbeatInterval(d time.Duration) Option {
 	return func(s *Server) { s.heartbeat = d }
 }
 
-// WithPipelines attaches the inbound and outbound pipelines so the server
-// can expose their composition at GET /v1/pipeline. Either may be nil when
-// a mode doesn't configure that direction.
-func WithPipelines(inbound, outbound *pipeline.Pipeline) Option {
+// WithPipelines attaches the inbound and outbound pipeline holders so
+// the server can expose their current composition at GET /v1/pipeline.
+// Either may be nil when a mode doesn't configure that direction.
+func WithPipelines(inbound, outbound *pipeline.Holder) Option {
 	return func(s *Server) {
 		s.inbound = inbound
 		s.outbound = outbound
@@ -124,13 +128,14 @@ func (s *Server) handlePipeline(w http.ResponseWriter, _ *http.Request) {
 	}
 }
 
-// describePipeline turns a *pipeline.Pipeline into its wire form, or an
-// empty slice when nil.
-func describePipeline(p *pipeline.Pipeline, direction string) []pipelinePluginView {
-	if p == nil {
+// describePipeline turns a *pipeline.Holder into its wire form, or an
+// empty slice when nil. Loads through the Holder so a hot-swap that
+// landed between requests is reflected immediately.
+func describePipeline(h *pipeline.Holder, direction string) []pipelinePluginView {
+	if h == nil {
 		return []pipelinePluginView{}
 	}
-	plugins := p.Plugins()
+	plugins := h.Plugins()
 	out := make([]pipelinePluginView, len(plugins))
 	for i, pl := range plugins {
 		caps := pl.Capabilities()

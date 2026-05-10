@@ -26,10 +26,15 @@ import (
 const maxBodySize = 1 << 20 // 1MB — matches Envoy's default per_stream_buffer_limit_bytes
 
 // Server implements the Envoy ext_proc ExternalProcessor gRPC service.
+//
+// InboundPipeline / OutboundPipeline are holders so the bound pipeline
+// can be hot-swapped under the running listener; each Process stream
+// Loads through the holder, so in-flight requests finish on the pipeline
+// they started with.
 type Server struct {
 	extprocv3.UnimplementedExternalProcessorServer
-	InboundPipeline  *pipeline.Pipeline
-	OutboundPipeline *pipeline.Pipeline
+	InboundPipeline  *pipeline.Holder
+	OutboundPipeline *pipeline.Holder
 	Sessions         *session.Store // nil when session tracking is disabled
 }
 
@@ -190,14 +195,14 @@ func (s *Server) recordInboundSession(pctx *pipeline.Context) {
 	}
 	sid := inboundSessionID(pctx)
 	ev := pipeline.SessionEvent{
-		At:        time.Now(),
-		Direction: pipeline.Inbound,
+		At:          time.Now(),
+		Direction:   pipeline.Inbound,
 		Phase:       pipeline.SessionRequest,
 		A2A:         snapshotA2A(pctx.Extensions.A2A),
 		Invocations: snapshotInvocations(pctx.Extensions.Invocations, pipeline.InvocationPhaseRequest),
-		Plugins:   plugins,
-		Identity:  snapshotIdentity(pctx),
-		Host:      pctx.Host,
+		Plugins:     plugins,
+		Identity:    snapshotIdentity(pctx),
+		Host:        pctx.Host,
 	}
 	s.Sessions.Append(sid, ev)
 }
@@ -228,14 +233,14 @@ func (s *Server) recordInboundReject(pctx *pipeline.Context, action pipeline.Act
 		message = action.Violation.Reason
 	}
 	ev := pipeline.SessionEvent{
-		At:         time.Now(),
+		At:          time.Now(),
 		Direction:   pipeline.Inbound,
 		Phase:       pipeline.SessionDenied,
 		Invocations: snapshotInvocations(pctx.Extensions.Invocations, pipeline.InvocationPhaseRequest),
-		Plugins:    snapshotPlugins(pctx.Extensions.Custom),
-		Identity:   snapshotIdentity(pctx),
-		Host:       pctx.Host,
-		StatusCode: status,
+		Plugins:     snapshotPlugins(pctx.Extensions.Custom),
+		Identity:    snapshotIdentity(pctx),
+		Host:        pctx.Host,
+		StatusCode:  status,
 		Error: &pipeline.EventError{
 			Kind:    "policy",
 			Code:    code,
@@ -330,17 +335,17 @@ func (s *Server) recordInboundResponseSession(pctx *pipeline.Context) {
 	}
 	sid := inboundSessionID(pctx)
 	ev := pipeline.SessionEvent{
-		At:         time.Now(),
-		Direction:  pipeline.Inbound,
+		At:          time.Now(),
+		Direction:   pipeline.Inbound,
 		Phase:       pipeline.SessionResponse,
 		A2A:         snapshotA2A(pctx.Extensions.A2A),
 		Invocations: snapshotInvocations(pctx.Extensions.Invocations, pipeline.InvocationPhaseResponse),
-		Plugins:    plugins,
-		Identity:   snapshotIdentity(pctx),
-		StatusCode: pctx.StatusCode,
-		Error:      deriveError(pctx),
-		Host:       pctx.Host,
-		Duration:   durationSince(pctx.StartedAt),
+		Plugins:     plugins,
+		Identity:    snapshotIdentity(pctx),
+		StatusCode:  pctx.StatusCode,
+		Error:       deriveError(pctx),
+		Host:        pctx.Host,
+		Duration:    durationSince(pctx.StartedAt),
 	}
 	s.Sessions.Append(sid, ev)
 }

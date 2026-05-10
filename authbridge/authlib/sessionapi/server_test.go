@@ -276,7 +276,7 @@ type fakePlugin struct {
 	caps pipeline.PluginCapabilities
 }
 
-func (f *fakePlugin) Name() string                             { return f.name }
+func (f *fakePlugin) Name() string                              { return f.name }
 func (f *fakePlugin) Capabilities() pipeline.PluginCapabilities { return f.caps }
 func (f *fakePlugin) OnRequest(_ context.Context, _ *pipeline.Context) pipeline.Action {
 	return pipeline.Action{Type: pipeline.Continue}
@@ -303,7 +303,7 @@ func TestHandlePipeline(t *testing.T) {
 
 	store := session.New(5*time.Minute, 100, 0)
 	defer store.Close()
-	srv := New(":0", store, WithPipelines(inbound, outbound))
+	srv := New(":0", store, WithPipelines(pipeline.NewHolder(inbound), pipeline.NewHolder(outbound)))
 	ts := httptest.NewServer(srv.server.Handler)
 	defer ts.Close()
 

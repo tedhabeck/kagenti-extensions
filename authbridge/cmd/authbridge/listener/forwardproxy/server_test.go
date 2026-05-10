@@ -27,13 +27,13 @@ func (m *mockVerifier) Verify(_ context.Context, _ string, _ string) (*validatio
 	return m.claims, m.err
 }
 
-func outboundPipelineFromAuth(t *testing.T, a *auth.Auth) *pipeline.Pipeline {
+func outboundPipelineFromAuth(t *testing.T, a *auth.Auth) *pipeline.Holder {
 	t.Helper()
 	p, err := plugintesting.BuildPipeline([]pipeline.Plugin{plugintesting.NewTokenExchange(a)})
 	if err != nil {
 		t.Fatalf("building outbound pipeline: %v", err)
 	}
-	return p
+	return pipeline.NewHolder(p)
 }
 
 func TestForwardProxy_Exchange(t *testing.T) {
@@ -170,7 +170,7 @@ func TestForwardProxy_BodyBuffering(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	srv := &Server{OutboundPipeline: p, Client: http.DefaultClient}
+	srv := &Server{OutboundPipeline: pipeline.NewHolder(p), Client: http.DefaultClient}
 	proxy := httptest.NewServer(srv.Handler())
 	defer proxy.Close()
 
@@ -208,7 +208,7 @@ func TestForwardProxy_BodyTooLarge(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	srv := &Server{OutboundPipeline: p, Client: http.DefaultClient}
+	srv := &Server{OutboundPipeline: pipeline.NewHolder(p), Client: http.DefaultClient}
 	proxy := httptest.NewServer(srv.Handler())
 	defer proxy.Close()
 
@@ -233,7 +233,7 @@ func TestForwardProxy_BodyTooLarge(t *testing.T) {
 
 func TestForwardProxy_NoBodyBuffering_WhenNotNeeded(t *testing.T) {
 	a := auth.New(auth.Config{})
-	p := outboundPipelineFromAuth(t, a) // default pipeline has no body-access plugins
+	p := outboundPipelineFromAuth(t, a) // default pipeline has no body-access plugins; already a Holder
 
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

@@ -537,7 +537,65 @@ The pipeline **does own**:
 
 ---
 
-## 9. Writing a plugin
+## 9. Config hot-reload
+
+Editing `authbridge-config-<agent>` no longer requires a pod restart. `authlib/reloader` watches the mounted config file and atomically swaps the inbound / outbound pipelines when content changes; listeners drain onto the new pipeline, old in-flight requests finish on the previous one.
+
+**The moving parts**
+
+| Component | Responsibility |
+|---|---|
+| `pipeline.Holder` | `atomic.Pointer[*Pipeline]` slot that listeners read every request. Delegating methods (`Run`, `RunResponse`, `NeedsBody`, `Ready`, `NotReadyPlugin`, `Plugins`) so call sites don't change. |
+| `authlib/reloader.Reloader` | Owns the fsnotify watcher, debouncer, content-hash dedup, validation, and drain scheduling. |
+| `main.go` | Provides a `PipelineBuilder` closure that mirrors the startup `Load → ApplyPreset → Validate → plugins.Build` sequence, so startup and reload run identical code. |
+
+**Operator workflow**
+
+```sh
+# 1. Edit the mounted ConfigMap
+kubectl edit configmap authbridge-config-<agent> -n <ns>
+#    (or: kubectl apply -f …)
+
+# 2. Wait ~60s for kubelet to sync the new content into the mount.
+#    For instant reload during testing, restart the pod instead.
+
+# 3. Confirm the swap via the stats port
+kubectl port-forward -n <ns> deploy/<agent> 9093:9093 &
+curl http://localhost:9093/reload/status        # last_success, counters, sha256
+curl http://localhost:9093/config               # now-active config
+```
+
+**Reload lifecycle (what happens when the file changes)**
+
+1. fsnotify event on the parent directory — we watch `/etc/authbridge/`, not `/etc/authbridge/config.yaml` directly, because ConfigMap mounts use symlink swap (`..data → ..<timestamp>`). A direct file watch misses the retarget.
+2. Debounce 250 ms so a symlink-swap's REMOVE+CREATE+CHMOD burst fires one reload, not three.
+3. SHA-256 dedup — identical bytes are ignored (mtime-only touches don't trigger rebuilds).
+4. `PipelineBuilder` runs: `config.Load` → mode override → `ApplyPreset` → `Validate` → `plugins.Build`. Any failure records the error in `Status.LastError` and leaves the active pipeline untouched.
+5. Compare the new config to the active one on unreloadable fields (`Mode`, `Listener.*`); refuse if they differ (see below).
+6. `Start` the new pipelines with a 60 s budget. On Start failure, `Stop` any partially-started pipelines so their goroutines don't leak.
+7. `inboundH.Store(newIn)` + `outboundH.Store(newOut)` — new requests now route to the new pipelines.
+8. Background goroutine: `time.Sleep(drainWindow)` (default 30 s) → `oldPipeline.Stop(ctx)` with a 15 s budget. In-flight requests that already Loaded the old pipeline finish against it.
+9. `Status.LastSuccess`, `ReloadsOK`, `ActiveConfigSHA256` update atomically.
+
+**What's reloadable, what isn't**
+
+| Change | Reloadable? | Why |
+|---|---|---|
+| Plugin list (add / remove / reorder plugins) | ✅ | Pipeline is rebuilt from scratch |
+| A plugin's `config:` subtree (issuer, bypass paths, routes, JWKS URL, etc.) | ✅ | Plugin's `Configure` runs again with new bytes |
+| `session.*` (TTL, MaxEvents, MaxSessions) | ⚠️ Reloaded into the `*Config`, but the live session store is built at startup — changes don't take effect until pod restart |
+| `mode` (`envoy-sidecar` / `waypoint` / `proxy-sidecar`) | ❌ | Different wire protocol + listener set; refuse reload |
+| `listener.*` (ports) | ❌ | Bound sockets; refuse reload |
+
+For the unreloadable cases, `Status.LastError` names the field(s) that changed and `ReloadsFailed` bumps — the operator can see from `/reload/status` that a pod restart is required.
+
+**Validation guarantee: bad YAML never takes the pod down.** Any failure during Load / Validate / Build / Start results in the status being updated and the active pipeline continuing to serve traffic on the previous config. Only a successful end-to-end reload swaps the holders.
+
+**Non-reloadable choices elsewhere.** The in-memory session store, the stat server, the session API server, and the reloader itself are all process-scoped — they live from startup to shutdown. A change to `session.enabled`, `listener.session_api_addr`, or the reloader's own knobs (drain window, debounce) requires a pod restart.
+
+---
+
+## 10. Writing a plugin
 
 For a step-by-step tutorial that walks through building a new plugin from scratch — minimal plugin, recording invocations, rejection, config, body access, out-of-tree packaging, testing — see [`plugin-tutorial.md`](./plugin-tutorial.md).
 
@@ -547,7 +605,7 @@ This document stays focused on the pipeline framework internals — how plugins 
 
 ---
 
-## 10. Open questions
+## 11. Open questions
 
 - **Priority / on-error policies.** Plugins don't declare these today. If fail-open / fail-closed behavior becomes important to express per plugin, it would be added to `PluginCapabilities` (or a sibling metadata struct) and interpreted by `Pipeline`.
 - **Body mutation semantics.** Today plugins generally don't rewrite `pctx.Body` or `pctx.ResponseBody`. If a plugin needs to modify the payload, we'd need a clear contract about whether downstream plugins see the modified or original bytes.
@@ -555,7 +613,7 @@ This document stays focused on the pipeline framework internals — how plugins 
 
 ---
 
-## 11. Versioning
+## 12. Versioning
 
 The plugin interface is **not** semver-stable yet (AuthBridge is pre-1.0). Changes since the initial release:
 - Added `BodyAccess` to `PluginCapabilities`.
@@ -570,12 +628,13 @@ The plugin interface is **not** semver-stable yet (AuthBridge is pre-1.0). Chang
 - **Unified invocation contract**: `AuthExtension` + `InboundAuth` + `OutboundAuth` collapsed into `Invocations` + `Invocation`. Every plugin (gate, parser, future) emits an Invocation record per pipeline pass using the 5-value `InvocationAction` vocabulary (allow / deny / skip / modify / observe). `SessionEvent.Auth` is now `SessionEvent.Invocations`.
 - **`pctx.Record` helpers**: `Allow` / `Skip` / `Observe` / `Modify` / `Record` / `DenyAndRecord` on `Context`. Framework-managed attribution (`currentPlugin`, `currentPhase`, `Path`) fills Invocation fields automatically.
 - **Open plugin registry**: plugins self-register from `init()` via `plugins.RegisterPlugin`. Third-party plugins in external modules drop in via a side-effect import. Closed `registry` map literal removed.
+- **Config hot-reload**: new `pipeline.Holder` (atomic wrapper) + `authlib/reloader` package (fsnotify-driven). Listeners receive `*Holder` instead of `*Pipeline`; the reloader atomically swaps the holder's contents when the config file changes. `mode` and `listener.*` edits are refused (pod restart required); any other change is picked up within the kubelet sync window (~60s). See §9.
 
 Breaking changes will be announced in `authbridge/CHANGELOG.md` (TBD) before a 1.0 tag.
 
 ---
 
-## 12. Cross-references
+## 13. Cross-references
 
 **Plugin-author docs** (pair with this framework reference):
 
@@ -585,11 +644,13 @@ Breaking changes will be announced in `authbridge/CHANGELOG.md` (TBD) before a 1
 **Package sources:**
 
 - `pipeline.go` — `Pipeline` type, `New`, `Run`, `RunResponse`, `Start`, `Stop`, `Plugins`, `NeedsBody`.
+- `holder.go` — `Holder`, the atomic slot listeners hold in place of a raw `*Pipeline`.
 - `plugin.go` — `Plugin` interface, `PluginCapabilities`, `Configurable`, `Initializer`, `Shutdowner`, `Readier`.
 - `action.go` — `Action`, `ActionType`, `Violation`, helper constructors (`Deny`, `DenyStatus`, `DenyWithDetails`, `Challenge`, `RateLimited`), `StatusFromCode`.
 - `context.go` — `Context`, `Direction`, `AgentIdentity`, and the `pctx.Record` / `Allow` / `Skip` / `Observe` / `Modify` / `DenyAndRecord` helpers.
 - `extensions.go` — `Extensions` struct, `Invocation`, `Invocations`, `InvocationAction`, named protocol extensions, `GetState` / `SetState`.
 - `session.go` — `SessionEvent`, `SessionView`, `SessionPhase`, marshalers.
+- `authlib/reloader/` — `Reloader`, `Status`, `PipelineBuilder`, `WithDrainWindow` / `WithDebounce` / `WithStartTimeout`, `Handler()` (serves `/reload/status`).
 
 **Downstream integrators:**
 
