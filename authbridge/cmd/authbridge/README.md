@@ -77,7 +77,7 @@ The `--mode` flag can also be set in the YAML config. The flag overrides the con
 
 YAML with `${ENV_VAR}` expansion. Undefined env vars are preserved as-is (not expanded to empty).
 
-The runtime config is intentionally thin — it covers the mode, the listener addresses, session tracking, and the plugin pipeline. Everything a plugin needs (issuer, token URL, credentials, routes, bypass paths) lives under its own `config:` block inside the pipeline entry. See [`authlib/plugins/CONVENTIONS.md`](../../authlib/plugins/CONVENTIONS.md) for the per-plugin decode / defaults / validate convention.
+The runtime config is intentionally thin — it covers the mode, the listener addresses, session tracking, and the plugin pipeline. Everything a plugin needs (issuer, token URL, credentials, routes, bypass paths) lives under its own `config:` block inside the pipeline entry. See [`docs/plugin-reference.md`](../../docs/plugin-reference.md) for the per-plugin decode / defaults / validate convention.
 
 ### envoy-sidecar mode
 

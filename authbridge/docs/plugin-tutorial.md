@@ -1,0 +1,302 @@
+# Writing a Plugin
+
+**Audience:** someone building their first authbridge plugin. Walks
+from an empty file to a fully-registered plugin with config, recording,
+body access, and tests.
+
+**See also:**
+- [`plugin-reference.md`](./plugin-reference.md) — field-level reference for config,
+  invocation recording, and the registration contract.
+- [`framework-architecture.md`](./framework-architecture.md) — how the pipeline
+  composes plugins and the lifecycle of a request.
+
+A step-by-step guide to building a new authbridge plugin. For reference-style
+detail on config, registration, and invocation recording, see
+[`plugin-reference.md`](./plugin-reference.md).
+
+## What a plugin is
+
+A plugin is a Go type that implements the `pipeline.Plugin` interface and
+registers itself in the plugin registry. The pipeline invokes it on every
+request (OnRequest) and, in reverse order, on every response (OnResponse).
+Plugins can read `pctx`, mutate headers/body, reject the request, and record
+diagnostic invocations that show up in `/v1/sessions` and in `abctl`.
+
+## Step 1 — The minimal plugin
+
+Create a file under `authbridge/authlib/plugins/hellolog.go`:
+
+```go
+package plugins
+
+import (
+	"context"
+	"log/slog"
+
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
+)
+
+type HelloLog struct{}
+
+func NewHelloLog() *HelloLog { return &HelloLog{} }
+
+func (p *HelloLog) Name() string { return "hello-log" }
+
+func (p *HelloLog) Capabilities() pipeline.PluginCapabilities {
+	return pipeline.PluginCapabilities{}
+}
+
+func (p *HelloLog) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
+	slog.Info("hello-log: request", "path", pctx.Path)
+	pctx.Observe("request_seen")
+	return pipeline.Action{Type: pipeline.Continue}
+}
+
+func (p *HelloLog) OnResponse(_ context.Context, pctx *pipeline.Context) pipeline.Action {
+	slog.Info("hello-log: response", "status", pctx.StatusCode)
+	pctx.Observe("response_seen")
+	return pipeline.Action{Type: pipeline.Continue}
+}
+
+func init() {
+	RegisterPlugin("hello-log", func() pipeline.Plugin { return NewHelloLog() })
+}
+```
+
+That's a complete plugin. Operator YAML adds it to a pipeline:
+
+```yaml
+pipeline:
+  inbound:
+    plugins:
+      - name: jwt-validation
+      - name: hello-log
+```
+
+## Step 2 — Record what your plugin did
+
+Every plugin should tell the operator what it did on each message.
+The pipeline fills in `Plugin`, `Phase`, and `Path` automatically — you
+supply only the action and reason. Use the one-liner that fits:
+
+```go
+pctx.Allow("authorized")          // gate plugin approved
+pctx.Skip("path_bypass")          // plugin ran but didn't act
+pctx.Observe("matched_tools/call") // parser extracted data
+pctx.Modify("token_replaced")      // plugin mutated the message
+```
+
+For invocations that carry extra diagnostic context, use `Record`:
+
+```go
+pctx.Record(pipeline.Invocation{
+	Action:        pipeline.ActionAllow,
+	Reason:        "authorized",
+	TokenSubject:  claims.Subject,
+	TokenScopes:   claims.Scopes,
+})
+```
+
+See [`plugin-reference.md`](./plugin-reference.md#emitting-session-events) for the
+full field set and the 5-value action vocabulary.
+
+## Step 3 — Reject a request
+
+Return a `Reject` action when your plugin should stop the pipeline:
+
+```go
+if !allowed {
+	return pipeline.Deny("policy.forbidden", "caller not permitted")
+}
+```
+
+Helper constructors exist for the common cases:
+
+```go
+pipeline.Deny(code, reason)                           // generic deny
+pipeline.DenyStatus(401, code, reason)                // override status
+pipeline.Challenge("realm", "missing credentials")    // 401 + WWW-Authenticate
+pipeline.RateLimited(30*time.Second, "", "slow down") // 429 + Retry-After
+```
+
+When you want to emit an invocation AND reject in one call, use
+`pctx.DenyAndRecord`:
+
+```go
+return pctx.DenyAndRecord("caller_not_allowed", "policy.forbidden", "caller not permitted")
+```
+
+## Step 4 — Add config
+
+If your plugin needs configurable knobs, implement
+`pipeline.Configurable`:
+
+```go
+type HelloConfig struct {
+	Greeting string `json:"greeting"`
+}
+
+type HelloLog struct {
+	cfg HelloConfig
+}
+
+func (p *HelloLog) Configure(raw json.RawMessage) error {
+	if len(raw) == 0 {
+		p.cfg.Greeting = "hello" // default
+		return nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields() // reject typos loudly
+	if err := dec.Decode(&p.cfg); err != nil {
+		return fmt.Errorf("hello-log config: %w", err)
+	}
+	if p.cfg.Greeting == "" {
+		p.cfg.Greeting = "hello"
+	}
+	return nil
+}
+```
+
+Operator YAML:
+
+```yaml
+- name: hello-log
+  config:
+    greeting: "hola"
+```
+
+See [`plugin-reference.md`](./plugin-reference.md#the-four-step-configure-pattern)
+for the strict-decode / defaults / validate / construct pattern.
+
+## Step 5 — Body access
+
+If your plugin needs to read the request or response body (e.g., to
+parse JSON, scan for credentials, or apply a content filter), declare
+it in `Capabilities`:
+
+```go
+func (p *HelloLog) Capabilities() pipeline.PluginCapabilities {
+	return pipeline.PluginCapabilities{BodyAccess: true}
+}
+```
+
+The listener then tells Envoy to buffer the body so `pctx.Body` (request)
+and `pctx.ResponseBody` (response) are populated. Without the declaration,
+both stay nil even if you try to read them.
+
+## Step 6 — Out-of-tree plugins
+
+A plugin living in another Go module follows the same pattern, but
+imports the registry instead of sharing its package:
+
+```go
+// github.com/acme/my-plugin/myplugin.go
+package myplugin
+
+import (
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins"
+)
+
+type MyPlugin struct{}
+
+func (p *MyPlugin) Name() string { return "my-plugin" }
+// ... Capabilities / OnRequest / OnResponse ...
+
+func init() {
+	plugins.RegisterPlugin("my-plugin", func() pipeline.Plugin { return &MyPlugin{} })
+}
+```
+
+The operator's authbridge build picks it up with a single side-effect
+import:
+
+```go
+// authbridge/cmd/authbridge/plugins_extra.go
+package main
+
+import _ "github.com/acme/my-plugin"
+```
+
+No fork of kagenti-extensions required.
+
+## Step 7 — Test your plugin
+
+Tests that call `OnRequest` / `OnResponse` directly need to set the
+framework attribution fields on `pctx` so `Record` fills `Plugin` and
+`Phase` correctly. The `invokeOnRequest` / `invokeOnResponse` helpers
+in `plugins_test.go` do this:
+
+```go
+func TestHelloLog_Observes(t *testing.T) {
+	p := NewHelloLog()
+	pctx := &pipeline.Context{Direction: pipeline.Inbound, Path: "/x"}
+	action := invokeOnRequest(p, pctx)
+	if action.Type != pipeline.Continue {
+		t.Fatalf("want Continue, got %v", action.Type)
+	}
+	if pctx.Extensions.Invocations == nil ||
+		len(pctx.Extensions.Invocations.Inbound) != 1 {
+		t.Fatalf("expected one invocation, got %+v", pctx.Extensions.Invocations)
+	}
+	inv := pctx.Extensions.Invocations.Inbound[0]
+	if inv.Plugin != "hello-log" || inv.Reason != "request_seen" {
+		t.Errorf("invocation = %+v", inv)
+	}
+}
+```
+
+For test isolation (a fake plugin registered in one test should not
+leak into another) use `t.Cleanup` with `UnregisterPlugin`:
+
+```go
+func TestScenario(t *testing.T) {
+	plugins.RegisterPlugin("fake", func() pipeline.Plugin { return &fakePlugin{} })
+	t.Cleanup(func() { plugins.UnregisterPlugin("fake") })
+	// ...
+}
+```
+
+## Optional interfaces
+
+Beyond the four required methods, plugins may implement:
+
+| Interface | When |
+|---|---|
+| `pipeline.Configurable` | Takes YAML config. See Step 4. |
+| `pipeline.Initializer` | Needs one-time setup before serving (load a model, warm a cache, spawn a goroutine). |
+| `pipeline.Shutdowner` | Needs graceful cleanup on pod termination (flush audit events, close connections). |
+| `pipeline.Readier` | Has deferred initialization that affects `/readyz` (e.g., waiting on a credential file). |
+
+All optional. A plugin that doesn't implement them is treated as
+"always ready, no init, no shutdown." Definitions are in
+`authbridge/authlib/pipeline/plugin.go`.
+
+## Gotchas
+
+- **Don't hold pctx across goroutines.** The pipeline resets pctx's
+  framework fields after each plugin returns. Recording an invocation
+  from a spawned goroutine attributes it to whichever plugin the
+  pipeline happens to be dispatching at the time — usually garbage.
+- **Reads/writes on Extensions slots aren't compile-checked.** The
+  pipeline's `Capabilities` validation catches "plugin A reads slot X
+  but no earlier plugin writes X," but typos in string names silently
+  fall through. Use the constants in `pipeline/extensions.go` when
+  they exist.
+- **DisallowUnknownFields or nothing.** Strict decode in Configure is
+  not optional. A misspelled key at startup is always a bug; lenient
+  decode hides it until it misbehaves at 3am.
+- **Name collisions panic.** Two plugins registering under the same
+  name panic at process start. Fix: pick a unique name.
+
+## Cross-references
+
+- [`plugin-reference.md`](./plugin-reference.md) — reference detail on config
+  patterns, the invocation contract, the 5-value action vocabulary,
+  and the registration rules.
+- [`framework-architecture.md`](./framework-architecture.md) — how the pipeline
+  composes plugins, the Run / RunResponse dispatch order, and the
+  lifecycle hooks.
+- [`pipeline/plugin.go`](../pipeline/plugin.go) — the Plugin interface
+  and all optional interfaces (Initializer / Shutdowner / Readier /
+  Configurable).

@@ -18,7 +18,7 @@ import "encoding/json"
 //   - An error from Configure aborts pipeline construction and takes the
 //     process down; do not partial-initialize and return nil.
 //
-// See authbridge/authlib/plugins/CONVENTIONS.md for the recommended shape
+// See authbridge/docs/plugin-reference.md for the recommended shape
 // of per-plugin config and a worked example.
 type Configurable interface {
 	Configure(raw json.RawMessage) error

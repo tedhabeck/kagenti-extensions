@@ -7,7 +7,7 @@
 # authbridge/CLAUDE.md "Required ConfigMaps for Webhook Injection".
 #
 # Plugin settings live under pipeline.*.plugins[].config; see
-# authbridge/authlib/plugins/CONVENTIONS.md for the per-plugin schema.
+# authbridge/docs/plugin-reference.md for the per-plugin schema.
 # Fields omitted below fall back to plugin defaults — notably:
 #   jwt-validation: audience_file=/shared/client-id.txt, bypass_paths
 #                   = .well-known/* + health/ready/live probes,

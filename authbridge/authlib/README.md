@@ -14,15 +14,15 @@ A pure Go library providing reusable building blocks for JWT validation, OAuth 2
 | `routing/` | Host-to-audience router with glob pattern matching |
 | `auth/` | Composition layer: `HandleInbound` + `HandleOutbound` — used internally by `jwt-validation` and `token-exchange` plugins |
 | `config/` | YAML config loader, mode presets, credential-file waiters, top-level validation |
-| `pipeline/` | Plugin pipeline + lifecycle (`Configurable`, `Initializer`, `Shutdowner`) — see [pipeline/README.md](./pipeline/README.md) |
+| `pipeline/` | Plugin pipeline + lifecycle (`Configurable`, `Initializer`, `Shutdowner`) — see [docs/framework-architecture.md](../docs/framework-architecture.md) |
 | `session/` | In-memory session store + `SessionSummary` aggregation, backing the `:9094` API |
 | `sessionapi/` | HTTP API (`/v1/sessions`, `/v1/events` SSE, `/v1/pipeline`) exposing the session store |
-| `plugins/` | Built-in plugins: `jwt-validation`, `token-exchange`, `a2a-parser`, `mcp-parser`, `inference-parser`. See [plugins/CONVENTIONS.md](./plugins/CONVENTIONS.md) for the per-plugin config convention |
+| `plugins/` | Built-in plugins: `jwt-validation`, `token-exchange`, `a2a-parser`, `mcp-parser`, `inference-parser`. See [docs/plugin-reference.md](../docs/plugin-reference.md) for the per-plugin config convention |
 | `observe/` | OTEL + metrics helpers |
 
 ## Usage
 
-Plugins own their own configuration and construct any `auth.Auth` they need internally from their per-plugin config (see [plugins/CONVENTIONS.md](./plugins/CONVENTIONS.md)). Host processes (cmd/authbridge) just load the YAML, call `plugins.Build`, run the pipelines, and let each plugin handle its own dependencies.
+Plugins own their own configuration and construct any `auth.Auth` they need internally from their per-plugin config (see [docs/plugin-reference.md](../docs/plugin-reference.md)). Host processes (cmd/authbridge) just load the YAML, call `plugins.Build`, run the pipelines, and let each plugin handle its own dependencies.
 
 ```go
 import (

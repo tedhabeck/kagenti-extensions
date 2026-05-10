@@ -276,4 +276,4 @@ Press `p` to pause stream rendering. The SSE connection stays open (events don't
 
 - **GitHub-issue demo** — same idea with **outbound token exchange** and scope-based access control: [demo-ui.md](../github-issue/demo-ui.md). In `abctl` you'll see an additional outbound `exchange` plugin activity on the pipeline pane, and different `targetAudience` values on outbound events.
 - **Advanced weather demo** — adds **AuthBridge on the tool side** so you can inspect a second set of inbound pipeline events when the agent calls the MCP tool: [demo-ui-advanced.md](./demo-ui-advanced.md).
-- **The plugin pipeline spec** — if you want to understand the data structures (`pctx`, `Extensions`, `SessionEvent`, `GetState`/`SetState`), or integrate a custom plugin or sub-pipeline engine: [pipeline/README.md](../../authlib/pipeline/README.md).
+- **The plugin pipeline spec** — if you want to understand the data structures (`pctx`, `Extensions`, `SessionEvent`, `GetState`/`SetState`), or integrate a custom plugin or sub-pipeline engine: [framework-architecture.md](../../docs/framework-architecture.md).

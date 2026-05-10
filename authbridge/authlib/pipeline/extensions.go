@@ -25,7 +25,7 @@ import "time"
 //     The listener serializes matching entries into SessionEvent.Plugins
 //     at record time — keyed by the plugin name (suffix stripped). A
 //     new plugin can surface events to /v1/sessions without any
-//     authlib modification. See authlib/plugins/CONVENTIONS.md for the
+//     authlib modification. See authbridge/docs/plugin-reference.md for the
 //     convention + promotion criteria for named-slot graduation.
 //
 // The suffix convention keeps the two intents unambiguous at write

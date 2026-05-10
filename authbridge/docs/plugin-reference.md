@@ -1,10 +1,20 @@
-# Plugin Config Conventions
+# Plugin Author Reference
+
+**Audience:** plugin authors who already know the basics and need the
+contract — field names, invariants, error behaviour, the rules that the
+framework enforces at startup.
+
+**See also:**
+- [`plugin-tutorial.md`](./plugin-tutorial.md) — step-by-step tutorial for writing a new plugin.
+- [`framework-architecture.md`](./framework-architecture.md) — how the pipeline
+  composes plugins, the lifecycle, the Context / Extensions wire shape.
 
 How plugins under `authbridge/authlib/plugins/` receive, validate, and
-apply their configuration. Everything here is convention — the framework
-only requires `pipeline.Configurable` if the plugin has any config at all.
-The rest of this document exists so that the sixth and tenth plugin
-don't each invent their own style.
+apply their configuration; emit session events; and register themselves
+with the pipeline builder. Everything here is convention — the framework
+only requires `pipeline.Configurable` if the plugin has any config at
+all. The rest of this document exists so that the sixth and tenth
+plugin don't each invent their own style.
 
 ## Scope
 
@@ -274,57 +284,79 @@ authentication isn't happening.
 
 ## Emitting session events
 
-Every plugin MUST emit at least one `Invocation` record per
+Every plugin MUST emit at least one `Invocation` record per active
 `OnRequest` / `OnResponse` call. Plugins may also populate one of the
 typed protocol extensions (`MCP`, `A2A`, `Inference`) when they carry
-structured semantic payload, and may additionally publish arbitrary
-plugin-specific events through the `Custom` escape-hatch map.
+structured semantic payload, and may additionally publish plugin-
+specific events through the `Custom` escape-hatch map.
 
-### 1. Invocation record (required for every plugin)
+> For a tutorial on emitting Invocations — the `pctx.Record` / `Allow`
+> / `Skip` / `Observe` / `Modify` / `DenyAndRecord` helpers with
+> runnable examples — see [`plugin-tutorial.md` Step 2](./plugin-tutorial.md#step-2--record-what-your-plugin-did).
+> This section is the field-level reference for the `Invocation`
+> struct, the 5-value action vocabulary, and the rules around the
+> Custom escape-hatch map.
+
+### 1. Invocation record — field reference
 
 An `Invocation` says *which* plugin ran and *what* it did, in a
 5-value vocabulary shared across all plugins. abctl renders one row
-per invocation — without an invocation record, a plugin's work is
-invisible to the operator.
+per invocation. Every plugin that runs on a pipeline pass produces
+at least one.
 
 ```go
-// Append one record per OnRequest/OnResponse call. Helper functions
-// exist in each plugin package; the listener snapshot will pick them up
-// from pctx.Extensions.Invocations.
-pctx.Extensions.Invocations = &pipeline.Invocations{
-    Inbound: []pipeline.Invocation{{
-        Plugin: "jwt-validation",
-        Action: pipeline.ActionAllow,    // 5-value verb
-        Reason: "authorized",             // machine-stable reason code
-        Path:   pctx.Path,
-    }},
+type Invocation struct {
+    Plugin           string           // plugin.Name(); framework-filled
+    Action           InvocationAction // 5-value: allow | deny | skip | modify | observe
+    Phase            InvocationPhase  // "request" | "response"; framework-filled
+    Reason           string           // machine-stable code
+    Path             string           // request path; framework-filled
+
+    // Optional diagnostic fields; populated selectively:
+    ExpectedIssuer, ExpectedAudience string
+    TokenSubject                     string
+    TokenAudience, TokenScopes       []string
+    RouteMatched                     bool
+    RouteHost, TargetAudience        string
+    RequestedScopes                  []string
+    CacheHit                         bool
 }
 ```
 
-The 5 actions and when to use them:
+The framework fills `Plugin`, `Phase`, and `Path` when the plugin
+emits via `pctx.Record` / `Allow` / `Skip` / `Observe` / `Modify` /
+`DenyAndRecord`. A plugin may override those fields explicitly — but
+only in test harnesses where the plugin runs outside a
+`Pipeline.Run` dispatch loop.
+
+**The 5-value action vocabulary** (complete):
 
 | Action | Meaning | Example |
 |---|---|---|
 | `allow` | Gate plugin permitted the request | jwt-validation on valid token |
 | `deny` | Gate plugin rejected the request; pipeline stops | jwt-validation on bad token, token-exchange on IdP failure |
-| `skip` | Plugin ran but didn't act on this message | jwt-validation on a bypass path; parser whose body didn't match |
+| `skip` | Plugin ran but didn't act on this message | jwt-validation bypass path; parser whose body didn't match |
 | `modify` | Plugin mutated the message | token-exchange replaced the Authorization header |
 | `observe` | Plugin attached diagnostic data; flow unchanged | parsers extracting MCP / A2A / Inference state |
 
 `Reason` is a stable machine-readable label (e.g. `path_bypass`,
 `no_matching_route`, `jwt_failed`, `matched_tools/call`) that
-discriminates within an Action value. Filters in abctl can match on
+discriminates within an Action value. abctl filters can match
 either — `/skip` shows every skip action regardless of reason;
 `/path_bypass` narrows to that specific skip flavour.
 
-Fields populated selectively: auth gates fill `ExpectedIssuer` /
-`ExpectedAudience` / `Token*`; outbound routers fill `Route*` and
-`CacheHit`; parsers typically fill only `Plugin` / `Action` /
-`Reason` / `Path` because their semantic payload lives on the typed
-extension slot.
+**Which diagnostic fields to populate:**
 
-NEVER put raw tokens, signatures, or secrets in an `Invocation`. The
-session store has no auth.
+- Auth gates (jwt-validation and kin): `ExpectedIssuer`,
+  `ExpectedAudience`, `TokenSubject`, `TokenAudience`, `TokenScopes`.
+- Outbound routers (token-exchange and kin): `RouteMatched`,
+  `RouteHost`, `TargetAudience`, `RequestedScopes`, `CacheHit`.
+- Parsers: usually none — their semantic payload lives on the typed
+  extension slot (A2A / MCP / Inference). Emit with just Action +
+  Reason.
+
+**NEVER put raw tokens, signatures, or secrets in an Invocation.**
+The session store has no auth.
 
 ### 2. Named protocol extension (optional, for parsers)
 
@@ -391,10 +423,75 @@ Graduate to a typed slot when ≥2 of these are true:
 Don't graduate speculatively — the map path has no cost if you stay
 in it.
 
+## Registering a plugin
+
+A plugin advertises itself to the pipeline builder through `RegisterPlugin`
+in its package `init()`. The registration is open — any package that
+imports `authlib/plugins` can register a plugin, regardless of whether it
+lives in this module. The pattern mirrors `database/sql` drivers and
+`log/slog` handlers.
+
+> For a step-by-step walkthrough (in-tree file layout, out-of-tree
+> module + side-effect import, operator YAML wiring), see
+> [`plugin-tutorial.md` Step 6](./plugin-tutorial.md#step-6--out-of-tree-plugins). This
+> section is the field-level reference: the factory shape and the
+> panic-on-misuse guarantees that define the registry's contract.
+
+### Factory shape
+
+```go
+// authbridge/authlib/plugins/jwtvalidation.go
+func init() {
+    RegisterPlugin("jwt-validation", func() pipeline.Plugin { return NewJWTValidation() })
+}
+```
+
+The factory is called once per pipeline instance during `Build`. It must
+return a fresh `pipeline.Plugin`; the registry does not cache the returned
+value. Two pipeline entries with the same name produce two independent
+plugin instances, each decoded from its own `config:` block.
+
+### Rules and guardrails
+
+- **Double-registration panics.** If two packages both register under the
+  same name, the second call panics at process start. This is the
+  correct behaviour: silent last-write-wins would let a version
+  conflict poison the pipeline composition in ways that only surface as
+  mysterious runtime behaviour.
+- **Empty name panics.** An empty plugin name cannot be referenced from
+  YAML; registering under one is a programmer bug, not a recoverable
+  condition.
+- **Nil factory panics.** A nil factory would defer the crash until
+  `Build` tried to call it; panic at registration is closer to the bug.
+- **Unknown plugin fails Build.** `Build` rejects entries whose name
+  isn't in the registry; the error message includes every registered
+  name so typos are easy to spot.
+
+### Testing against the registry
+
+Tests that need a fake plugin use `RegisterPlugin` + `t.Cleanup` with
+`UnregisterPlugin`:
+
+```go
+func TestMyScenario(t *testing.T) {
+    plugins.RegisterPlugin("fake-auth", func() pipeline.Plugin {
+        return &fakeAuth{}
+    })
+    t.Cleanup(func() { plugins.UnregisterPlugin("fake-auth") })
+
+    p, err := plugins.Build([]config.PluginEntry{{Name: "fake-auth"}})
+    // ... assert on p ...
+}
+```
+
+`UnregisterPlugin` is test-only by convention — production code should
+never call it. It exists to keep tests isolated from each other under
+`-parallel`.
+
 ## Cross-references
 
 - `authbridge/authlib/pipeline/configurable.go` — the interface.
-- `authbridge/authlib/pipeline/README.md` — how plugins compose and
+- `authbridge/docs/framework-architecture.md` — how plugins compose and
   run; Configure's place in the lifecycle.
 - `authbridge/authlib/config/config.go` — `PluginEntry` YAML shape and
   parsing.

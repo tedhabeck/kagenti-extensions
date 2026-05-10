@@ -112,7 +112,7 @@ with protocol-specific listeners in `cmd/authbridge/listener/`:
 
 **Configuration loading:**
 - YAML config with `${ENV_VAR}` expansion, mode presets, and startup validation.
-- Plugin settings are local to each plugin under `pipeline.*.plugins[].config`; the runtime YAML itself only carries `mode`, `listener`, `session`, `stats`, and the pipeline composition. See [`cmd/authbridge/README.md`](cmd/authbridge/README.md) for the per-mode YAML shape and [`authlib/plugins/CONVENTIONS.md`](authlib/plugins/CONVENTIONS.md) for the per-plugin decode pattern.
+- Plugin settings are local to each plugin under `pipeline.*.plugins[].config`; the runtime YAML itself only carries `mode`, `listener`, `session`, `stats`, and the pipeline composition. See [`cmd/authbridge/README.md`](cmd/authbridge/README.md) for the per-mode YAML shape and [`docs/plugin-reference.md`](docs/plugin-reference.md) for the per-plugin decode pattern.
 - The operator-supplied env vars (`KEYCLOAK_URL`, `KEYCLOAK_REALM`, `TOKEN_URL`, `ISSUER`, `DEFAULT_OUTBOUND_POLICY`, `CLIENT_ID`) are consumed by the default `authbridge-combined.yaml` via `${VAR}` expansion — they land inside the appropriate plugin's `config:` block rather than a top-level section.
 - `jwt-validation` derives `jwks_url` from `issuer` when omitted (appends `/protocol/openid-connect/certs`).
 - `token-exchange` derives `token_url` from `keycloak_url + keycloak_realm` when omitted (Keycloak convention).
@@ -127,8 +127,8 @@ with protocol-specific listeners in `cmd/authbridge/listener/`:
 - `authlib/routing/` -- Host-to-audience route resolver (used internally by `token-exchange` plugin)
 - `authlib/auth/` -- `HandleInbound` + `HandleOutbound` composition; each plugin instance constructs its own `auth.Auth` from its own local config
 - `authlib/config/` -- Mode presets, YAML config loader, credential-file waiters, top-level (mode + listener + session) validation
-- `authlib/pipeline/` -- Plugin interface + lifecycle (`Configurable`, `Initializer`, `Shutdowner`); see [`authlib/pipeline/README.md`](authlib/pipeline/README.md)
-- `authlib/plugins/` -- The concrete plugins + registry; see [`authlib/plugins/CONVENTIONS.md`](authlib/plugins/CONVENTIONS.md) for the per-plugin config convention
+- `authlib/pipeline/` -- Plugin interface + lifecycle (`Configurable`, `Initializer`, `Shutdowner`); see [`docs/framework-architecture.md`](docs/framework-architecture.md)
+- `authlib/plugins/` -- The concrete plugins + registry; see [`docs/plugin-reference.md`](docs/plugin-reference.md) for the per-plugin config convention
 
 ### init-iptables.sh
 
@@ -340,7 +340,7 @@ Every event on `/v1/sessions/{id}` and `/v1/events` carries:
 - `at`, `direction`, `phase` — when, which side, what stage. `phase` is one of `"request"`, `"response"`, or `"denied"` (terminal denial from a pipeline plugin — typically a jwt-validation failure).
 - `a2a` / `mcp` / `inference` — protocol parser payloads (one at most).
 - `invocations` — per-plugin invocation records for every plugin that ran on the pipeline pass. Structured as `{inbound: [...], outbound: [...]}`; each entry carries `plugin`, `action` (one of 5 values — see below), `reason` (machine-stable code), and optional plugin-specific context (expected issuer, target audience, cache-hit flag, path, etc.). abctl renders one row per invocation, so operators see an explicit per-plugin timeline.
-- `plugins` — escape-hatch map for plugin-specific observability. Keys are plugin names; values are the raw JSON each plugin emitted. Unknown plugins render as opaque JSON in abctl. See `authlib/plugins/CONVENTIONS.md` "Emitting session events" for the producer contract.
+- `plugins` — escape-hatch map for plugin-specific observability. Keys are plugin names; values are the raw JSON each plugin emitted. Unknown plugins render as opaque JSON in abctl. See [`docs/plugin-reference.md`](docs/plugin-reference.md#emitting-session-events) for the producer contract.
 - `identity`, `host`, `statusCode`, `error`, `durationMs` — request-level context.
 
 ### Invocation action vocabulary
@@ -356,6 +356,8 @@ Every plugin emits one of these 5 action values per invocation, so operators can
 | `observe` | Plugin attached diagnostic data without changing flow | a2a-parser, mcp-parser, inference-parser when they match |
 
 Use `reason` to discriminate within an action — e.g. `skip/path_bypass` vs `skip/no_matching_route` tell different stories at the detail-pane level but both scan as "skip" in the at-a-glance timeline.
+
+> **Producer-side contract:** the authoritative definition of the 5-value vocabulary, the `Invocation` struct fields, and which diagnostic fields each plugin type populates lives in [`docs/plugin-reference.md`](docs/plugin-reference.md#emitting-session-events). Edit that file when the vocabulary changes; this table is the consumer-side summary.
 
 ### Gotcha: denied requests
 

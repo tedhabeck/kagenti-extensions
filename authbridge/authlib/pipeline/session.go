@@ -99,7 +99,7 @@ type SessionEvent struct {
 	// consumers see the plugin name as the map key. Value is the plugin-
 	// provided struct marshaled to JSON — opaque from the listener's
 	// perspective. Consumers decode each key into their own type. See
-	// authlib/plugins/CONVENTIONS.md for the producer contract.
+	// authbridge/docs/plugin-reference.md for the producer contract.
 	Plugins map[string]json.RawMessage
 
 	// Identity snapshot at record time. Lets downstream plugins attribute an

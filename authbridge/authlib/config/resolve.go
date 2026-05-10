@@ -1,7 +1,7 @@
 // Package config's resolve.go previously constructed a shared
 // auth.Config + auth.Auth for all plugins to share. With per-plugin
 // configuration, that responsibility moved into each plugin's Configure
-// (see authbridge/authlib/plugins/CONVENTIONS.md), and this file is now
+// (see authbridge/docs/plugin-reference.md), and this file is now
 // just the shared credential-file waiters that multiple plugins need
 // when they share a file path (e.g. /shared/client-id.txt used by both
 // jwt-validation's audience_file and token-exchange's client_id_file).

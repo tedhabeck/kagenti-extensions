@@ -2,7 +2,7 @@ package config
 
 // ApplyPreset fills in mode-specific defaults for listener addresses.
 // Plugin-specific defaults live inside each plugin's Configure (see
-// authbridge/authlib/plugins/CONVENTIONS.md); the runtime config no
+// authbridge/docs/plugin-reference.md); the runtime config no
 // longer shapes plugin behavior.
 func ApplyPreset(cfg *Config) {
 	switch cfg.Mode {

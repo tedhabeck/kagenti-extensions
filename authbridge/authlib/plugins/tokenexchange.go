@@ -21,7 +21,7 @@ import (
 )
 
 // tokenExchangeConfig is the plugin's local config schema. See
-// authlib/plugins/CONVENTIONS.md for the pattern.
+// authbridge/docs/plugin-reference.md for the pattern.
 type tokenExchangeConfig struct {
 	// TokenURL is the OAuth token endpoint. Explicit value wins; else
 	// derived from KeycloakURL + KeycloakRealm using Keycloak's
@@ -202,6 +202,10 @@ type TokenExchange struct {
 
 // NewTokenExchange constructs an unconfigured plugin.
 func NewTokenExchange() *TokenExchange { return &TokenExchange{} }
+
+func init() {
+	RegisterPlugin("token-exchange", func() pipeline.Plugin { return NewTokenExchange() })
+}
 
 func (p *TokenExchange) Name() string { return "token-exchange" }
 
@@ -472,9 +476,7 @@ func (p *TokenExchange) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 	// either tighten routes or filter on action=passthrough in abctl.
 	switch result.Action {
 	case auth.ActionDeny:
-		appendInvocationOutbound(pctx, pipeline.Invocation{
-			Plugin:          "token-exchange",
-			Phase:           pipeline.InvocationPhaseRequest,
+		pctx.Record(pipeline.Invocation{
 			Action:          pipeline.ActionDeny,
 			Reason:          result.DenyReasonCode.String(),
 			RouteMatched:    result.RouteMatched,
@@ -497,9 +499,7 @@ func (p *TokenExchange) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 		if result.CacheHit {
 			reason = "cache_hit"
 		}
-		appendInvocationOutbound(pctx, pipeline.Invocation{
-			Plugin:          "token-exchange",
-			Phase:           pipeline.InvocationPhaseRequest,
+		pctx.Record(pipeline.Invocation{
 			Action:          pipeline.ActionModify,
 			Reason:          reason,
 			RouteMatched:    true,
@@ -517,9 +517,7 @@ func (p *TokenExchange) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 		if result.RouteMatched {
 			reason = "route_passthrough"
 		}
-		appendInvocationOutbound(pctx, pipeline.Invocation{
-			Plugin:       "token-exchange",
-			Phase:        pipeline.InvocationPhaseRequest,
+		pctx.Record(pipeline.Invocation{
 			Action:       pipeline.ActionSkip,
 			Reason:       reason,
 			RouteMatched: result.RouteMatched,
@@ -527,16 +525,6 @@ func (p *TokenExchange) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 		})
 	}
 	return pipeline.Action{Type: pipeline.Continue}
-}
-
-// appendInvocationOutbound lazy-creates pctx.Extensions.Invocations and
-// appends one entry under Outbound. Symmetric with appendInvocationInbound
-// in jwtvalidation.go.
-func appendInvocationOutbound(pctx *pipeline.Context, entry pipeline.Invocation) {
-	if pctx.Extensions.Invocations == nil {
-		pctx.Extensions.Invocations = &pipeline.Invocations{}
-	}
-	pctx.Extensions.Invocations.Outbound = append(pctx.Extensions.Invocations.Outbound, entry)
 }
 
 // splitScopes turns a space-separated scope string into []string. Returns

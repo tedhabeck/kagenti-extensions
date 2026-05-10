@@ -14,8 +14,8 @@ import (
 //
 // Plugin-specific settings (inbound JWT validation, outbound token
 // exchange, identity, bypass paths, routes) live inside their
-// respective entries under Pipeline.* now — see the plugin README at
-// authbridge/authlib/plugins/CONVENTIONS.md for how each plugin
+// respective entries under Pipeline.* now — see the plugin reference at
+// authbridge/docs/plugin-reference.md for how each plugin
 // declares its own config schema and defaults.
 type Config struct {
 	Mode     string         `yaml:"mode" json:"mode"` // "envoy-sidecar", "waypoint", "proxy-sidecar"
@@ -70,7 +70,7 @@ type PipelineStageConfig struct {
 // full form ({name, id, config}). The short form keeps existing pipeline
 // configs parsing unchanged; the long form is what plugins that
 // implement pipeline.Configurable actually need. See
-// authbridge/authlib/plugins/CONVENTIONS.md for the convention plugins
+// authbridge/docs/plugin-reference.md for the convention plugins
 // follow when decoding Config.
 //
 // Config is captured as a raw subtree via json.RawMessage so the plugin

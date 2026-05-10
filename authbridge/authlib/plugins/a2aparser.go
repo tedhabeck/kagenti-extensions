@@ -16,6 +16,10 @@ type A2AParser struct{}
 
 func NewA2AParser() *A2AParser { return &A2AParser{} }
 
+func init() {
+	RegisterPlugin("a2a-parser", func() pipeline.Plugin { return NewA2AParser() })
+}
+
 func (p *A2AParser) Name() string { return "a2a-parser" }
 
 func (p *A2AParser) Capabilities() pipeline.PluginCapabilities {
@@ -80,13 +84,7 @@ func (p *A2AParser) OnRequest(_ context.Context, pctx *pipeline.Context) pipelin
 	for i, part := range ext.Parts {
 		slog.Debug("a2a-parser: part", "index", i, "kind", part.Kind, "content", truncate(part.Content, debugBodyMax))
 	}
-	appendInvocationInbound(pctx, pipeline.Invocation{
-		Plugin: "a2a-parser",
-		Phase:  pipeline.InvocationPhaseRequest,
-		Action: pipeline.ActionObserve,
-		Reason: "matched_" + rpc.Method,
-		Path:   pctx.Path,
-	})
+	pctx.Observe("matched_" + rpc.Method)
 	return pipeline.Action{Type: pipeline.Continue}
 }
 
@@ -125,13 +123,7 @@ func (p *A2AParser) OnResponse(_ context.Context, pctx *pipeline.Context) pipeli
 		"artifactLen", len(pctx.Extensions.A2A.Artifact),
 		"error", pctx.Extensions.A2A.ErrorMessage,
 	)
-	appendInvocationInbound(pctx, pipeline.Invocation{
-		Plugin: "a2a-parser",
-		Phase:  pipeline.InvocationPhaseResponse,
-		Action: pipeline.ActionObserve,
-		Reason: "matched_" + pctx.Extensions.A2A.Method + "_response",
-		Path:   pctx.Path,
-	})
+	pctx.Observe("matched_" + pctx.Extensions.A2A.Method + "_response")
 	return pipeline.Action{Type: pipeline.Continue}
 }
 
