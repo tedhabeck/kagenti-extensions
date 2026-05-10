@@ -1,4 +1,4 @@
-package plugins
+package jwtvalidation
 
 import (
 	"bytes"
@@ -14,8 +14,9 @@ import (
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/bypass"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/config"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/jwtvalidation/validation"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/routing"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/validation"
 )
 
 // jwtValidationConfig is the plugin's local config schema. See
@@ -161,7 +162,7 @@ type JWTValidation struct {
 func NewJWTValidation() *JWTValidation { return &JWTValidation{} }
 
 func init() {
-	RegisterPlugin("jwt-validation", func() pipeline.Plugin { return NewJWTValidation() })
+	plugins.RegisterPlugin("jwt-validation", func() pipeline.Plugin { return NewJWTValidation() })
 }
 
 func (p *JWTValidation) Name() string { return "jwt-validation" }
@@ -387,5 +388,5 @@ var (
 	_ pipeline.Initializer  = (*JWTValidation)(nil)
 	_ pipeline.Shutdowner   = (*JWTValidation)(nil)
 	_ pipeline.Readier      = (*JWTValidation)(nil)
-	_ StatsSource           = (*JWTValidation)(nil)
+	_ plugins.StatsSource   = (*JWTValidation)(nil)
 )

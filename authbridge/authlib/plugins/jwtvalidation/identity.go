@@ -1,6 +1,6 @@
-package plugins
+package jwtvalidation
 
-import "github.com/kagenti/kagenti-extensions/authbridge/authlib/validation"
+import "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/jwtvalidation/validation"
 
 // claimsIdentity adapts a *validation.Claims to the pipeline.Identity
 // interface that Context exposes. Kept in the plugin so the pipeline

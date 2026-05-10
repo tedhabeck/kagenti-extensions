@@ -30,6 +30,14 @@ import (
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/observe"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins"
+	// Bundled plugins register themselves via init() on import. These
+	// two moved from flat files in plugins/ to their own subpackages
+	// (they own private subtrees for validation / exchange / cache /
+	// spiffe); we opt into them here. External plugins follow the
+	// same pattern — drop one line in here (or a plugins_extra.go) to
+	// include them in this binary's build.
+	_ "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/jwtvalidation"
+	_ "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenexchange"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/reloader"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/session"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/sessionapi"

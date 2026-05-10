@@ -13,7 +13,7 @@ import (
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/bypass"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/plugintesting"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/validation"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/jwtvalidation/validation"
 )
 
 type mockVerifier struct {

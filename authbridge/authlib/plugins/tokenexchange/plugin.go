@@ -1,4 +1,4 @@
-package plugins
+package tokenexchange
 
 import (
 	"bytes"
@@ -12,12 +12,13 @@ import (
 	"sync/atomic"
 
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/auth"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/cache"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/config"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/exchange"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenexchange/cache"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenexchange/exchange"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenexchange/spiffe"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/routing"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/spiffe"
 )
 
 // tokenExchangeConfig is the plugin's local config schema. See
@@ -204,7 +205,7 @@ type TokenExchange struct {
 func NewTokenExchange() *TokenExchange { return &TokenExchange{} }
 
 func init() {
-	RegisterPlugin("token-exchange", func() pipeline.Plugin { return NewTokenExchange() })
+	plugins.RegisterPlugin("token-exchange", func() pipeline.Plugin { return NewTokenExchange() })
 }
 
 func (p *TokenExchange) Name() string { return "token-exchange" }
@@ -574,5 +575,5 @@ var (
 	_ pipeline.Initializer  = (*TokenExchange)(nil)
 	_ pipeline.Shutdowner   = (*TokenExchange)(nil)
 	_ pipeline.Readier      = (*TokenExchange)(nil)
-	_ StatsSource           = (*TokenExchange)(nil)
+	_ plugins.StatsSource   = (*TokenExchange)(nil)
 )
