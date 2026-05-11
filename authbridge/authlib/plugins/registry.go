@@ -99,7 +99,15 @@ func factoryFor(name string) (PluginFactory, bool) {
 // currently-registered plugin — typo-catching diagnostic.
 func Build(entries []config.PluginEntry, opts ...pipeline.Option) (*pipeline.Pipeline, error) {
 	ps := make([]pipeline.Plugin, 0, len(entries))
+	policies := make([]pipeline.ErrorPolicy, 0, len(entries))
 	for _, e := range entries {
+		// ErrorPolicyOff removes the plugin from the running pipeline
+		// entirely — no Configure, no Init, no dispatch. Operators use
+		// off as a kill-switch without deleting the entry from YAML,
+		// which makes re-enabling a one-line edit.
+		if e.OnError.Resolved() == pipeline.ErrorPolicyOff {
+			continue
+		}
 		factory, ok := factoryFor(e.Name)
 		if !ok {
 			return nil, fmt.Errorf("unknown plugin %q (registered: %v)", e.Name, RegisteredPlugins())
@@ -113,6 +121,8 @@ func Build(entries []config.PluginEntry, opts ...pipeline.Option) (*pipeline.Pip
 			return nil, fmt.Errorf("plugin %q does not accept configuration", e.Name)
 		}
 		ps = append(ps, p)
+		policies = append(policies, e.OnError.Resolved())
 	}
+	opts = append(opts, pipeline.WithPolicies(policies...))
 	return pipeline.New(ps, opts...)
 }

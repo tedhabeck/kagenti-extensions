@@ -8,12 +8,14 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/auth"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/bypass"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/plugintesting"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/jwtvalidation/validation"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/plugintesting"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/session"
 )
 
 type mockVerifier struct {
@@ -293,5 +295,93 @@ func TestReverseProxy_BodyNotBuffered_WhenNotNeeded(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+// TestRecordInboundReject_EmitsDeniedPhase verifies the reverse-proxy
+// listener's inbound reject-event recording. Gap: before this, an
+// inbound request denied by jwt-validation or any other gate plugin
+// produced a 401/403 on the wire but no SessionDenied event — abctl
+// and /v1/sessions showed nothing, making misconfigurations invisible.
+func TestRecordInboundReject_EmitsDeniedPhase(t *testing.T) {
+	store := session.New(5*time.Minute, 100, 0)
+	defer store.Close()
+	s := &Server{Sessions: store}
+
+	pctx := &pipeline.Context{
+		Direction: pipeline.Inbound,
+		Host:      "agent.example",
+		Extensions: pipeline.Extensions{
+			A2A: &pipeline.A2AExtension{SessionID: "sess-abc"},
+			Invocations: &pipeline.Invocations{
+				Inbound: []pipeline.Invocation{{
+					Plugin: "jwt-validation", Action: pipeline.ActionDeny,
+					Phase: pipeline.InvocationPhaseRequest, Reason: "jwt_failed",
+					Details: map[string]string{
+						"expected_issuer": "http://issuer.example",
+					},
+				}},
+			},
+		},
+	}
+	action := pipeline.DenyStatus(401, "auth.unauthorized", "token validation failed")
+	s.recordInboundReject(pctx, action)
+
+	v := store.View("sess-abc")
+	if v == nil || len(v.Events) != 1 {
+		t.Fatalf("expected 1 event under sess-abc, got %+v", v)
+	}
+	ev := v.Events[0]
+	if ev.Direction != pipeline.Inbound || ev.Phase != pipeline.SessionDenied {
+		t.Errorf("Direction/Phase = %v/%v, want Inbound/SessionDenied", ev.Direction, ev.Phase)
+	}
+	if ev.StatusCode != 401 || ev.Error == nil || ev.Error.Code != "auth.unauthorized" {
+		t.Errorf("Status/Error = %d/%+v, want 401/auth.unauthorized", ev.StatusCode, ev.Error)
+	}
+	if ev.Invocations == nil || len(ev.Invocations.Inbound) != 1 {
+		t.Errorf("Invocations lost on denied event: %+v", ev.Invocations)
+	}
+}
+
+// TestRecordInboundReject_FallbackBucketing confirms the bucket
+// selection falls through A2A.SessionID → ActiveSession → default.
+// A request with no A2A context (bypass path that denied in a later
+// gate) lands in the default bucket so operators still see it.
+func TestRecordInboundReject_FallbackBucketing(t *testing.T) {
+	store := session.New(5*time.Minute, 100, 0)
+	defer store.Close()
+	s := &Server{Sessions: store}
+
+	pctx := &pipeline.Context{
+		Direction: pipeline.Inbound,
+		Extensions: pipeline.Extensions{
+			Invocations: &pipeline.Invocations{
+				Inbound: []pipeline.Invocation{{
+					Plugin: "jwt-validation", Action: pipeline.ActionDeny,
+					Phase: pipeline.InvocationPhaseRequest, Reason: "no_header",
+				}},
+			},
+		},
+	}
+	action := pipeline.DenyStatus(401, "auth.unauthorized", "no bearer token")
+	s.recordInboundReject(pctx, action)
+
+	if v := store.View(session.DefaultSessionID); v == nil || len(v.Events) != 1 {
+		t.Fatalf("expected 1 event in default bucket, got %+v", v)
+	}
+}
+
+// TestRecordInboundReject_SkipsWithoutInvocations confirms the skip
+// rule: denials with no diagnostic context are not recorded.
+func TestRecordInboundReject_SkipsWithoutInvocations(t *testing.T) {
+	store := session.New(5*time.Minute, 100, 0)
+	defer store.Close()
+	s := &Server{Sessions: store}
+
+	action := pipeline.DenyStatus(401, "auth.unauthorized", "denied")
+	s.recordInboundReject(&pipeline.Context{Direction: pipeline.Inbound}, action)
+
+	if v := store.View(session.DefaultSessionID); v != nil {
+		t.Errorf("expected no event, got %+v", v)
 	}
 }

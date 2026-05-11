@@ -1319,6 +1319,120 @@ func TestRecordInboundReject_SkipsWithoutAuth(t *testing.T) {
 	}
 }
 
+// TestRecordOutboundReject_EmitsDeniedPhase verifies that a rejected
+// outbound request produces a SessionDenied event with the outbound
+// direction tag, the plugin's Invocation context, and the Violation
+// mapped onto StatusCode + EventError. Gap: before this, outbound
+// denies (future IBAC, rate-limit, guardrail plugins) would surface
+// only as a 4xx on the agent and never appear in /v1/sessions or abctl.
+func TestRecordOutboundReject_EmitsDeniedPhase(t *testing.T) {
+	store := session.New(5*time.Minute, 100, 0)
+	defer store.Close()
+	// Seed an active session so ActiveSession() returns it instead of
+	// empty — mirrors the real request flow (inbound recorded first).
+	store.Append("sess-active", pipeline.SessionEvent{
+		At: time.Now().Add(-50 * time.Millisecond),
+		Direction: pipeline.Inbound, Phase: pipeline.SessionRequest,
+		A2A: &pipeline.A2AExtension{Method: "message/send", SessionID: "sess-active"},
+	})
+	s := &Server{Sessions: store}
+
+	pctx := &pipeline.Context{
+		Direction: pipeline.Outbound,
+		StartedAt: time.Now().Add(-10 * time.Millisecond),
+		Host:      "external.example",
+		Extensions: pipeline.Extensions{
+			Invocations: &pipeline.Invocations{
+				Outbound: []pipeline.Invocation{{
+					Plugin: "ibac",
+					Phase:  pipeline.InvocationPhaseRequest,
+					Action: pipeline.ActionDeny,
+					Reason: "blocked",
+					Details: map[string]string{
+						"intent_preview": "summarize my emails",
+						"action":         "POST http://external.example",
+						"llm_reason":     "action unrelated to user intent",
+					},
+				}},
+			},
+		},
+	}
+	action := pipeline.DenyStatus(403, "ibac.blocked", "action unrelated to user intent")
+	s.recordOutboundReject(pctx, action)
+
+	v := store.View("sess-active")
+	if v == nil || len(v.Events) != 2 {
+		t.Fatalf("expected 2 events under sess-active (seed + denied), got %v", v)
+	}
+	ev := v.Events[1]
+	if ev.Direction != pipeline.Outbound {
+		t.Errorf("Direction = %v, want Outbound", ev.Direction)
+	}
+	if ev.Phase != pipeline.SessionDenied {
+		t.Errorf("Phase = %v, want SessionDenied", ev.Phase)
+	}
+	if ev.StatusCode != 403 {
+		t.Errorf("StatusCode = %d, want 403", ev.StatusCode)
+	}
+	if ev.Error == nil || ev.Error.Code != "ibac.blocked" {
+		t.Errorf("Error = %+v, want code=ibac.blocked", ev.Error)
+	}
+	if ev.Host != "external.example" {
+		t.Errorf("Host = %q, want external.example", ev.Host)
+	}
+	if ev.Invocations == nil || len(ev.Invocations.Outbound) != 1 ||
+		ev.Invocations.Outbound[0].Action != pipeline.ActionDeny {
+		t.Errorf("Invocations context lost on denied event: %+v", ev.Invocations)
+	}
+	if ev.Duration <= 0 {
+		t.Errorf("Duration = %v, want > 0", ev.Duration)
+	}
+}
+
+// TestRecordOutboundReject_NoActiveSession verifies the default-bucket
+// fallback: when no session has been appended yet, the denial lands
+// under DefaultSessionID so operators can still see it in /v1/sessions.
+func TestRecordOutboundReject_NoActiveSession(t *testing.T) {
+	store := session.New(5*time.Minute, 100, 0)
+	defer store.Close()
+	s := &Server{Sessions: store}
+
+	pctx := &pipeline.Context{
+		Direction: pipeline.Outbound,
+		StartedAt: time.Now(),
+		Extensions: pipeline.Extensions{
+			Invocations: &pipeline.Invocations{
+				Outbound: []pipeline.Invocation{{
+					Plugin: "ibac", Action: pipeline.ActionDeny,
+					Phase: pipeline.InvocationPhaseRequest, Reason: "blocked",
+				}},
+			},
+		},
+	}
+	action := pipeline.DenyStatus(403, "ibac.blocked", "blocked")
+	s.recordOutboundReject(pctx, action)
+
+	if v := store.View(session.DefaultSessionID); v == nil || len(v.Events) != 1 {
+		t.Fatalf("expected 1 event under default session, got %v", v)
+	}
+}
+
+// TestRecordOutboundReject_SkipsWithoutInvocations mirrors the inbound
+// skip rule: a denial with no Invocation context would produce a
+// content-free event, noise for operators without attribution.
+func TestRecordOutboundReject_SkipsWithoutInvocations(t *testing.T) {
+	store := session.New(5*time.Minute, 100, 0)
+	defer store.Close()
+	s := &Server{Sessions: store}
+
+	action := pipeline.DenyStatus(403, "policy.forbidden", "forbidden")
+	s.recordOutboundReject(&pipeline.Context{Direction: pipeline.Outbound}, action)
+
+	if v := store.View(session.DefaultSessionID); v != nil {
+		t.Errorf("expected no event recorded, got %+v", v)
+	}
+}
+
 // TestSnapshotPlugins_FiltersByEventSuffix verifies the plugin-public
 // observability convention: only Custom entries with keys ending in
 // pipeline.PluginEventSuffix are promoted to SessionEvent.Plugins.

@@ -63,6 +63,23 @@ func TestInvocationRow_Cells(t *testing.T) {
 			wantAction: "observe",
 			wantPlugin: "a2a-parser",
 		},
+		{
+			name: "shadow deny (observe mode)",
+			row: invocationRow{
+				event: &pipeline.SessionEvent{},
+				inv: &pipeline.Invocation{
+					Plugin: "pii-scrubber",
+					Action: pipeline.ActionDeny,
+					Shadow: true,
+				},
+				direction: pipeline.Inbound,
+			},
+			// Asterisk suffix flags the would-have-blocked event so
+			// operators can visually separate real denies from shadow
+			// denies in the timeline.
+			wantAction: "deny*",
+			wantPlugin: "pii-scrubber",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -231,6 +231,46 @@ type Invocations struct {
 	Outbound []Invocation `json:"outbound,omitempty"`
 }
 
+// FilteredByPhase returns a new *Invocations containing only entries
+// whose Phase matches the argument. Strict match — untagged entries
+// (Phase == "") are dropped because the framework always populates
+// Phase via Context.Record; an untagged entry is a plugin bug and
+// including it in the wrong phase would double-report in one event
+// and be missing from the other.
+//
+// The underlying Invocation values are copied shallowly; mutating a
+// returned entry's Details map mutates the source. Acceptable for
+// the per-request flow where the original lives only on pctx and is
+// discarded after recording.
+//
+// Returns nil when no entries match so callers can drop the field
+// from the SessionEvent without a null check.
+//
+// Intended for reject-event recording in listeners and for the
+// accept-path phase split (one SessionEvent per phase). Listeners
+// that need full independence from pctx's lifecycle layer their own
+// snapshot on top.
+func (in *Invocations) FilteredByPhase(phase InvocationPhase) *Invocations {
+	if in == nil {
+		return nil
+	}
+	out := &Invocations{}
+	for _, inv := range in.Inbound {
+		if inv.Phase == phase {
+			out.Inbound = append(out.Inbound, inv)
+		}
+	}
+	for _, inv := range in.Outbound {
+		if inv.Phase == phase {
+			out.Outbound = append(out.Outbound, inv)
+		}
+	}
+	if out.Inbound == nil && out.Outbound == nil {
+		return nil
+	}
+	return out
+}
+
 // Invocation records one plugin's action on one pipeline pass. Plugin is
 // the plugin's Name() for traceability. Action is the universal 5-value
 // verb (see Action). Reason is a stable machine-readable label paired
@@ -295,6 +335,15 @@ type Invocation struct {
 	// The session API has no auth on it — only safe-to-log data
 	// belongs in Invocation.Details.
 	Details map[string]string `json:"details,omitempty"`
+
+	// Shadow reports that the plugin ran under on_error: observe and
+	// its decision (deny or modify) was NOT applied to the request.
+	// An operator reading a would-have-blocked timeline filters on
+	// Shadow=true to count rollout-candidate events; a dashboard that
+	// aggregates "effective denies" filters Shadow=false. The
+	// framework, not the plugin, sets this — plugin code looks
+	// identical under enforce and observe.
+	Shadow bool `json:"shadow,omitempty"`
 }
 
 // DelegationExtension tracks the token delegation chain across hops.

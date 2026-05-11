@@ -176,6 +176,15 @@ func (r invocationRow) actionCell() string {
 	if r.inv == nil {
 		return "—"
 	}
+	// Under on_error: observe the framework converts Reject to a
+	// pass-through and marks the Invocation Shadow=true. Prefix the
+	// action with an asterisk so operators scanning the timeline can
+	// spot would-have-blocked rows at a glance — the request actually
+	// passed. Width stays within the 8-char column budget (deny* fits,
+	// observe* fits, modify* fits at 7).
+	if r.inv.Shadow {
+		return string(r.inv.Action) + "*"
+	}
 	return string(r.inv.Action)
 }
 
@@ -612,4 +621,3 @@ func truncateScopes(scopes []string, n int) string {
 	}
 	return strings.Join(scopes[:n], ", ") + fmt.Sprintf(" +%d more", len(scopes)-n)
 }
-

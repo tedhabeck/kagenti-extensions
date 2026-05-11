@@ -40,15 +40,124 @@ pipeline:
           audience_file: "/shared/client-id.txt"
           bypass_paths:
             - "/healthz"
+      - name: pii-scrubber
+        on_error: observe                # canary: log would-blocks, don't block
+        config:
+          patterns: [ssn, credit_card]
 ```
 
 - **`name`** — required. Must match a key in the plugin registry.
 - **`id`** — optional. Defaults to `name`. Lets two instances of the same
   plugin coexist with different config (not yet exercised, but the shape
   is reserved).
+- **`on_error`** — optional. One of `enforce` (default), `observe`, or
+  `off`. See [`on_error` policy](#on_error-policy) below.
 - **`config`** — optional. Arbitrary YAML sub-tree owned by the plugin.
   The framework does not interpret it; it's captured as `json.RawMessage`
   and handed to `Configure`.
+
+## `on_error` policy
+
+> **Naming caveat.** Despite the name, `on_error` controls how the
+> framework handles **intentional `Deny` actions** returned by the
+> plugin — it is not a panic/error handler. A panic or a
+> runtime-error return still surfaces as a 500 regardless of this
+> setting. Reach for `on_error` to stage the rollout of a new
+> guardrail (observe before enforce) or to toggle a plugin off
+> without a redeploy; reach for something else when you want to
+> bound misbehavior.
+
+`on_error` is a **framework-owned** wrapper around the plugin — plugin
+authors do not read it, implement it, or branch on it. Its job is to
+let operators roll out a new guardrail without risking production.
+
+| Policy | Plugin dispatched? | Reject → | Body mutation → | Typical use |
+|---|---|---|---|---|
+| `enforce` (default) | yes | HTTP error, pipeline stops | applied to wire | Production guardrails |
+| `observe` | yes | shadow `Invocation`, request passes | suppressed (no-op) | Canarying a new plugin |
+| `off` | **no** | n/a | n/a | Kill-switch without redeploy |
+
+### Observe is plugin-transparent
+
+Under `observe`, the plugin's `OnRequest` / `OnResponse` runs exactly as
+under `enforce`. If it returns `pipeline.Deny(...)`, the framework
+intercepts: it marks the plugin's `Invocation` with `Shadow: true`, logs
+a `WARN pipeline: plugin would have denied (shadow)` line, and continues
+the pipeline. The request is not blocked. Body-mutation calls
+(`SetBody` / `SetResponseBody`) likewise record a `Shadow: true`
+invocation but do not alter the in-memory body or the wire bytes —
+downstream plugins and the upstream see the original.
+
+The upshot: the same plugin binary, dispatched the same way, is safe to
+ship in `observe` for a week while operators watch shadow metrics,
+then flipped to `enforce` with confidence.
+
+### Shadow timeline query
+
+Operators count would-have-blocked events by filtering Invocations on
+`shadow: true`:
+
+- `count(Invocations where shadow=true)` — rollout candidate volume
+- `count(Invocations where shadow=true and action="deny") by plugin` —
+  per-plugin shadow block rate
+- `count(Invocations where shadow=false and action="deny") by plugin` —
+  enforced denials (unchanged by this feature)
+
+### Don't put matched content in `Violation.Reason`
+
+`Reason` (the free-text explanation on `pipeline.Deny` / `DenyAndRecord`
+and on `Invocation.Reason`) flows to two places: the session store at
+`/v1/sessions` and, under `observe`, a `WARN` log line. Both live
+outside the authorization domain of the request itself — logs typically
+aggregate to a different backend than session events, with different
+retention and access policies.
+
+Plugin authors: **keep `Reason` to a machine-stable short code and/or a
+generic description.** Do not echo matched content, raw user input, or
+credential-shaped substrings into `Reason`.
+
+```go
+// GOOD
+return pctx.DenyAndRecord("ssn_match", "pii.detected", "matched PII pattern")
+
+// BAD — echoes a matched SSN into logs and the session store:
+return pctx.DenyAndRecord("ssn_match", "pii.detected",
+    fmt.Sprintf("matched SSN %s at offset 42", ssn))
+```
+
+If you need to record which pattern matched for debugging, put a
+**hash or stable fingerprint** of the content in `Invocation.Details`
+(`Details["match_sha256"] = "a1b2c3..."`), never the raw match. The
+same rule applies to `Details` values — see the existing "NEVER put
+raw tokens, signatures, or client credentials" note on the Invocation
+type below.
+
+### Off vs. removing the entry
+
+Both achieve "don't run this plugin." `off` exists so a single field
+flip re-enables the plugin without re-adding the whole block to YAML.
+An `off` entry is not `Configure`d and not added to the running
+pipeline; its `config:` subtree is not validated. Remove the entry
+entirely if you don't anticipate re-enabling it.
+
+### What `on_error` does not do
+
+- Not a circuit breaker — a crashing plugin in `observe` still crashes
+  on every request. Bound crash loops with a separate mechanism.
+- Not sampling — `observe` runs the plugin on 100% of traffic.
+  Percentage rollout is a future feature.
+- Not a timeout — a slow plugin still blocks the request. Per-plugin
+  deadlines are a separate knob.
+- Not a panic / runtime-error handler (see the leading caveat at the
+  top of this section).
+
+### Applicability to auth gates
+
+`on_error` is a generic framework knob that applies to every plugin
+including built-in auth gates (`jwt-validation`, `token-exchange`).
+Shadowing auth turns authentication into a suggestion — don't do this
+in production. Shadow-mode is for third-party guardrails being
+canaried; auth gates should stay on `enforce` (the default).
 
 ## The Configurable interface
 
@@ -315,6 +424,13 @@ type Invocation struct {
     // Plugin-specific diagnostic context. Opaque to the framework;
     // abctl renders as key=value rows in the detail pane.
     Details map[string]string
+
+    // Shadow is framework-set; plugins never write it. True when the
+    // plugin ran under on_error: observe and its decision (deny or
+    // modify) was NOT applied to the request. Dashboards partition
+    // on Shadow: enforced outcomes (shadow=false) vs rollout
+    // candidates (shadow=true).
+    Shadow bool
 }
 ```
 
