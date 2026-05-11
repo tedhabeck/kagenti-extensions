@@ -95,6 +95,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	action := s.InboundPipeline.Run(r.Context(), pctx)
 	if action.Type == pipeline.Reject {
+		s.recordInboundReject(pctx, action)
 		writeRejection(w, action)
 		return
 	}
@@ -175,6 +176,82 @@ func (s *Server) errorHandler(w http.ResponseWriter, _ *http.Request, err error)
 		return
 	}
 	http.Error(w, `{"error":"bad gateway"}`, http.StatusBadGateway)
+}
+
+// recordInboundReject emits a SessionDenied event for inbound requests
+// a pipeline plugin rejected. Lets gate plugins (jwt-validation and
+// future inbound guardrails) show operators what was blocked and why
+// via /v1/sessions and abctl, instead of the block appearing only as
+// a 401/403 on the caller side.
+//
+// Skips when no Invocations were appended — the deny came from a
+// plugin that didn't contribute diagnostic context, and a content-free
+// SessionDenied event would be noise without attribution.
+func (s *Server) recordInboundReject(pctx *pipeline.Context, action pipeline.Action) {
+	if s.Sessions == nil || pctx.Extensions.Invocations == nil {
+		return
+	}
+	// Inbound uses the A2A-stated contextId when available; otherwise
+	// falls through to the default bucket. Matches the accept path's
+	// bucketing rule (A2A request event at line 112-125).
+	sid := ""
+	if pctx.Extensions.A2A != nil {
+		sid = pctx.Extensions.A2A.SessionID
+	}
+	if sid == "" {
+		sid = s.Sessions.ActiveSession()
+	}
+	if sid == "" {
+		sid = session.DefaultSessionID
+	}
+	var status int
+	var code, message string
+	if action.Violation != nil {
+		status = action.Violation.Status
+		if status == 0 {
+			status = pipeline.StatusFromCode(action.Violation.Code)
+		}
+		code = action.Violation.Code
+		message = action.Violation.Reason
+	}
+	ev := pipeline.SessionEvent{
+		At:          time.Now(),
+		Direction:   pipeline.Inbound,
+		Phase:       pipeline.SessionDenied,
+		Invocations: filterInvocationsByPhase(pctx.Extensions.Invocations, pipeline.InvocationPhaseRequest),
+		Host:        pctx.Host,
+		StatusCode:  status,
+		Error: &pipeline.EventError{
+			Kind:    "policy",
+			Code:    code,
+			Message: message,
+		},
+	}
+	s.Sessions.Append(sid, ev)
+}
+
+// filterInvocationsByPhase returns only the invocations matching the
+// phase. Mirrors the filter used by the extproc listener so reject
+// events carry the request-phase entries that attributed the block.
+func filterInvocationsByPhase(ext *pipeline.Invocations, phase pipeline.InvocationPhase) *pipeline.Invocations {
+	if ext == nil {
+		return nil
+	}
+	out := &pipeline.Invocations{}
+	for _, inv := range ext.Inbound {
+		if inv.Phase == "" || inv.Phase == phase {
+			out.Inbound = append(out.Inbound, inv)
+		}
+	}
+	for _, inv := range ext.Outbound {
+		if inv.Phase == "" || inv.Phase == phase {
+			out.Outbound = append(out.Outbound, inv)
+		}
+	}
+	if out.Inbound == nil && out.Outbound == nil {
+		return nil
+	}
+	return out
 }
 
 // writeRejection renders a pipeline Reject to the http.ResponseWriter,

@@ -9,14 +9,16 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/auth"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/jwtvalidation/validation"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/plugintesting"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenexchange/cache"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenexchange/exchange"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/plugintesting"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/routing"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/jwtvalidation/validation"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/session"
 )
 
 type mockVerifier struct {
@@ -335,3 +337,70 @@ func TestForwardProxy_NoBodyBuffering_WhenNotNeeded(t *testing.T) {
 		t.Errorf("status = %d, want 200", resp.StatusCode)
 	}
 }
+
+// TestRecordOutboundReject_EmitsDeniedPhase verifies the forward-proxy
+// listener's reject-event recording: a rejected outbound request
+// produces a SessionDenied event with the plugin Invocation context
+// and the Violation mapped to StatusCode + EventError.
+func TestRecordOutboundReject_EmitsDeniedPhase(t *testing.T) {
+	store := session.New(5*time.Minute, 100, 0)
+	defer store.Close()
+	store.Append("sess-active", pipeline.SessionEvent{
+		At:        time.Now().Add(-50 * time.Millisecond),
+		Direction: pipeline.Inbound,
+		Phase:     pipeline.SessionRequest,
+		A2A:       &pipeline.A2AExtension{Method: "message/send", SessionID: "sess-active"},
+	})
+	s := &Server{Sessions: store}
+
+	pctx := &pipeline.Context{
+		Direction: pipeline.Outbound,
+		Host:      "external.example",
+		Extensions: pipeline.Extensions{
+			Invocations: &pipeline.Invocations{
+				Outbound: []pipeline.Invocation{{
+					Plugin: "ibac", Action: pipeline.ActionDeny,
+					Phase: pipeline.InvocationPhaseRequest, Reason: "blocked",
+					Details: map[string]string{"llm_reason": "unrelated to user intent"},
+				}},
+			},
+		},
+	}
+	action := pipeline.DenyStatus(403, "ibac.blocked", "unrelated to user intent")
+	s.recordOutboundReject(pctx, action)
+
+	v := store.View("sess-active")
+	if v == nil || len(v.Events) != 2 {
+		t.Fatalf("expected 2 events under sess-active, got %+v", v)
+	}
+	ev := v.Events[1]
+	if ev.Direction != pipeline.Outbound || ev.Phase != pipeline.SessionDenied {
+		t.Errorf("Direction/Phase = %v/%v, want Outbound/SessionDenied", ev.Direction, ev.Phase)
+	}
+	if ev.StatusCode != 403 || ev.Error == nil || ev.Error.Code != "ibac.blocked" {
+		t.Errorf("Status/Error = %d/%+v, want 403/ibac.blocked", ev.StatusCode, ev.Error)
+	}
+	if ev.Host != "external.example" {
+		t.Errorf("Host = %q, want external.example", ev.Host)
+	}
+	if ev.Invocations == nil || len(ev.Invocations.Outbound) != 1 {
+		t.Errorf("Invocations lost on denied event: %+v", ev.Invocations)
+	}
+}
+
+// TestRecordOutboundReject_SkipsWithoutInvocations confirms the skip
+// rule matches extproc's equivalent: denials with no diagnostic
+// context are not recorded, so session stream attribution stays
+// meaningful.
+func TestRecordOutboundReject_SkipsWithoutInvocations(t *testing.T) {
+	store := session.New(5*time.Minute, 100, 0)
+	defer store.Close()
+	s := &Server{Sessions: store}
+
+	action := pipeline.DenyStatus(403, "policy.forbidden", "forbidden")
+	s.recordOutboundReject(&pipeline.Context{Direction: pipeline.Outbound}, action)
+
+	if v := store.View(session.DefaultSessionID); v != nil {
+		t.Errorf("expected no event, got %+v", v)
+	}
+} 

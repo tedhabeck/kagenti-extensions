@@ -84,6 +84,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	action := s.OutboundPipeline.Run(r.Context(), pctx)
 
 	if action.Type == pipeline.Reject {
+		s.recordOutboundReject(pctx, action)
 		writeRejection(w, action)
 		return
 	}
@@ -205,6 +206,76 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	if _, err := io.Copy(w, resp.Body); err != nil {
 		slog.Debug("response copy error", "host", r.Host, "error", err)
 	}
+}
+
+// recordOutboundReject emits a SessionDenied event for outbound
+// requests a pipeline plugin rejected. Symmetric to the accept path's
+// session recording (above). Lets guardrail plugins (rate-limit,
+// intent-based, content policy) show operators what was blocked and
+// why via /v1/sessions and abctl, instead of the block appearing only
+// as a 4xx/5xx on the agent side.
+//
+// Skips when no Invocations were appended — the deny came from a
+// plugin that didn't contribute diagnostic context, and a content-free
+// SessionDenied event would be noise without attribution.
+func (s *Server) recordOutboundReject(pctx *pipeline.Context, action pipeline.Action) {
+	if s.Sessions == nil || pctx.Extensions.Invocations == nil {
+		return
+	}
+	sid := s.Sessions.ActiveSession()
+	if sid == "" {
+		sid = session.DefaultSessionID
+	}
+	var status int
+	var code, message string
+	if action.Violation != nil {
+		status = action.Violation.Status
+		if status == 0 {
+			status = pipeline.StatusFromCode(action.Violation.Code)
+		}
+		code = action.Violation.Code
+		message = action.Violation.Reason
+	}
+	ev := pipeline.SessionEvent{
+		At:          time.Now(),
+		Direction:   pipeline.Outbound,
+		Phase:       pipeline.SessionDenied,
+		Invocations: filterInvocationsByPhase(pctx.Extensions.Invocations, pipeline.InvocationPhaseRequest),
+		Host:        pctx.Host,
+		StatusCode:  status,
+		Error: &pipeline.EventError{
+			Kind:    "policy",
+			Code:    code,
+			Message: message,
+		},
+	}
+	s.Sessions.Append(sid, ev)
+}
+
+// filterInvocationsByPhase returns only the invocations that match the
+// given phase. Used by reject-event recording to avoid emitting response-
+// phase entries on a request-phase denial (the pipeline's Reject
+// terminates before RunResponse, so phase filtering is redundant in
+// practice, but stays consistent with the extproc listener's helper).
+func filterInvocationsByPhase(ext *pipeline.Invocations, phase pipeline.InvocationPhase) *pipeline.Invocations {
+	if ext == nil {
+		return nil
+	}
+	out := &pipeline.Invocations{}
+	for _, inv := range ext.Inbound {
+		if inv.Phase == "" || inv.Phase == phase {
+			out.Inbound = append(out.Inbound, inv)
+		}
+	}
+	for _, inv := range ext.Outbound {
+		if inv.Phase == "" || inv.Phase == phase {
+			out.Outbound = append(out.Outbound, inv)
+		}
+	}
+	if out.Inbound == nil && out.Outbound == nil {
+		return nil
+	}
+	return out
 }
 
 func extractBearer(authHeader string) string {
