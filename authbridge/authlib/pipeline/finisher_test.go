@@ -397,6 +397,94 @@ func TestRunFinish_SetBodyDroppedDuringFinish(t *testing.T) {
 	}
 }
 
+// TestOutcomeFromContext covers the listener-facing derivation helper:
+// deny Invocations win, StatusCode 0 means Error, non-zero + no deny
+// means Allow. Shadow denials don't count.
+func TestOutcomeFromContext(t *testing.T) {
+	tests := []struct {
+		name     string
+		setup    func(*Context)
+		wantAct  OutcomeAction
+		wantDeny string
+	}{
+		{
+			name: "no invocations, status 200 → allow",
+			setup: func(pctx *Context) {
+				pctx.StatusCode = 200
+			},
+			wantAct: OutcomeAllow,
+		},
+		{
+			name: "no invocations, status 0 → error",
+			setup: func(pctx *Context) {
+				pctx.StatusCode = 0
+			},
+			wantAct: OutcomeError,
+		},
+		{
+			name: "no invocations, upstream 502 → allow (pipeline didn't deny)",
+			setup: func(pctx *Context) {
+				pctx.StatusCode = 502
+			},
+			wantAct: OutcomeAllow,
+		},
+		{
+			name: "inbound deny invocation → deny + plugin name",
+			setup: func(pctx *Context) {
+				pctx.StatusCode = 401
+				pctx.Extensions.Invocations = &Invocations{
+					Inbound: []Invocation{
+						{Plugin: "allow-plugin", Action: ActionAllow},
+						{Plugin: "jwt-validation", Action: ActionDeny, Reason: "bad_token"},
+					},
+				}
+			},
+			wantAct:  OutcomeDeny,
+			wantDeny: "jwt-validation",
+		},
+		{
+			name: "outbound deny wins over inbound deny (most recent)",
+			setup: func(pctx *Context) {
+				pctx.StatusCode = 503
+				pctx.Extensions.Invocations = &Invocations{
+					Inbound:  []Invocation{{Plugin: "inbound-gate", Action: ActionDeny}},
+					Outbound: []Invocation{{Plugin: "token-exchange", Action: ActionDeny, Reason: "idp_down"}},
+				}
+			},
+			wantAct:  OutcomeDeny,
+			wantDeny: "token-exchange",
+		},
+		{
+			name: "shadow deny ignored (observe mode — not an actual deny)",
+			setup: func(pctx *Context) {
+				pctx.StatusCode = 200
+				pctx.Extensions.Invocations = &Invocations{
+					Inbound: []Invocation{
+						{Plugin: "canary", Action: ActionDeny, Shadow: true},
+					},
+				}
+			},
+			wantAct: OutcomeAllow,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pctx := &Context{}
+			tc.setup(pctx)
+			out := OutcomeFromContext(pctx)
+			if out.FinalAction != tc.wantAct {
+				t.Errorf("FinalAction = %q, want %q", out.FinalAction, tc.wantAct)
+			}
+			if out.DenyingPlugin != tc.wantDeny {
+				t.Errorf("DenyingPlugin = %q, want %q", out.DenyingPlugin, tc.wantDeny)
+			}
+			if out.StatusCode != pctx.StatusCode {
+				t.Errorf("StatusCode = %d, want %d", out.StatusCode, pctx.StatusCode)
+			}
+		})
+	}
+}
+
 func equal(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

@@ -7,6 +7,7 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"time"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	authv3 "github.com/envoyproxy/go-control-plane/envoy/service/auth/v3"
@@ -53,7 +54,15 @@ func (s *Server) Check(ctx context.Context, req *authv3.CheckRequest) (*authv3.C
 		Host:      host,
 		Path:      path,
 		Headers:   mapToHTTPHeader(headers),
+		StartedAt: time.Now(),
 	}
+	// Finisher dispatch for inbound. Deferred before Run so the hook
+	// fires whether the pipeline allows, denies, or the Check returns
+	// early. Outbound's defer (added after the outbound pctx is
+	// created) runs first under LIFO.
+	defer func() {
+		s.InboundPipeline.RunFinish(ctx, inPctx, pipeline.OutcomeFromContext(inPctx))
+	}()
 	inAction := s.InboundPipeline.Run(ctx, inPctx)
 	if inAction.Type == pipeline.Reject {
 		return deniedFromAction(codes.Unauthenticated, inAction), nil
@@ -66,12 +75,25 @@ func (s *Server) Check(ctx context.Context, req *authv3.CheckRequest) (*authv3.C
 		Host:      host,
 		Path:      path,
 		Headers:   mapToHTTPHeader(headers),
+		StartedAt: time.Now(),
 	}
+	// Finisher dispatch for outbound. Only created/deferred if inbound
+	// allowed — mirrors the two-pipeline control flow.
+	defer func() {
+		s.OutboundPipeline.RunFinish(ctx, outPctx, pipeline.OutcomeFromContext(outPctx))
+	}()
 	originalAuth := outPctx.Headers.Get("Authorization")
 	outAction := s.OutboundPipeline.Run(ctx, outPctx)
 	if outAction.Type == pipeline.Reject {
 		return deniedFromAction(codes.PermissionDenied, outAction), nil
 	}
+
+	// Mark both pctxes as "allow" so OutcomeFromContext returns
+	// OutcomeAllow (StatusCode 0 would otherwise be classified as
+	// OutcomeError — ext_authz doesn't model an HTTP status, so we
+	// pick 200 as the sentinel for "Check returned OK").
+	inPctx.StatusCode = 200
+	outPctx.StatusCode = 200
 
 	newAuth := outPctx.Headers.Get("Authorization")
 	if newAuth != originalAuth {

@@ -75,3 +75,65 @@ type Outcome struct {
 func (c *Context) Outcome() *Outcome {
 	return c.outcome
 }
+
+// OutcomeFromContext derives a best-effort Outcome from a pctx's final
+// state, intended for listeners that want a one-liner finish call
+// without threading outcome state through nested response / error
+// callbacks. The derivation rules:
+//
+//   - A deny Invocation on either phase → OutcomeDeny, DenyingPlugin =
+//     the most recent deny's Plugin name. Most-recent rather than
+//     first so a response-side deny (e.g. an output filter) is
+//     correctly attributed over any earlier record.
+//   - No deny Invocation AND StatusCode > 0 → OutcomeAllow. The HTTP
+//     status itself is not sufficient to classify error vs allow — a
+//     legitimate 500 from the upstream is still a pipeline Allow.
+//   - No deny Invocation AND StatusCode == 0 → OutcomeError (no
+//     response was written: upstream transport failure, listener
+//     panic, etc.).
+//
+// Listeners with more precise information at hand (a typed error from
+// the upstream transport, a listener-level reject distinct from any
+// plugin deny) should construct Outcome explicitly rather than call
+// this helper. StatusCode is taken from pctx.StatusCode verbatim.
+// Duration is left zero; RunFinish auto-fills from pctx.StartedAt
+// when left unset.
+func OutcomeFromContext(pctx *Context) Outcome {
+	out := Outcome{StatusCode: pctx.StatusCode}
+	if denier, ok := lastDenyingPlugin(pctx); ok {
+		out.FinalAction = OutcomeDeny
+		out.DenyingPlugin = denier
+		return out
+	}
+	if pctx.StatusCode == 0 {
+		out.FinalAction = OutcomeError
+		return out
+	}
+	out.FinalAction = OutcomeAllow
+	return out
+}
+
+// lastDenyingPlugin walks pctx.Extensions.Invocations in reverse (both
+// directions) looking for the most-recent deny-action record. Returns
+// the plugin name and true if found; "", false otherwise.
+func lastDenyingPlugin(pctx *Context) (string, bool) {
+	if pctx.Extensions.Invocations == nil {
+		return "", false
+	}
+	// Check outbound first, then inbound — outbound Invocations are
+	// produced on a chain that runs after inbound on dual-listener
+	// deployments, so "most recent" under wall-clock is outbound.
+	for i := len(pctx.Extensions.Invocations.Outbound) - 1; i >= 0; i-- {
+		inv := pctx.Extensions.Invocations.Outbound[i]
+		if inv.Action == ActionDeny && !inv.Shadow {
+			return inv.Plugin, true
+		}
+	}
+	for i := len(pctx.Extensions.Invocations.Inbound) - 1; i >= 0; i-- {
+		inv := pctx.Extensions.Invocations.Inbound[i]
+		if inv.Action == ActionDeny && !inv.Shadow {
+			return inv.Plugin, true
+		}
+	}
+	return "", false
+}
