@@ -66,27 +66,28 @@ load_image_to_kind ghcr.io/kagenti/kagenti/spiffe-idp-setup:local
 echo "✅ Built and loaded: spiffe-idp-setup:local"
 echo ""
 
-# Build client-registration (CHANGED - UID 1000)
+# Build authbridge (proxy-sidecar combined: authbridge-proxy + spiffe-helper)
+# Default deployment shape — used when the workload's mode is proxy-sidecar.
 echo "=========================================="
-echo "Building client-registration"
+echo "Building authbridge (proxy-sidecar combined)"
 echo "=========================================="
-cd "${SCRIPT_DIR}/authbridge/client-registration"
-${CONTAINER_RUNTIME} build -t ghcr.io/kagenti/kagenti-extensions/client-registration:local .
-load_image_to_kind ghcr.io/kagenti/kagenti-extensions/client-registration:local
-echo "✅ Built and loaded: client-registration:local"
+cd "${SCRIPT_DIR}/authbridge"
+${CONTAINER_RUNTIME} build -f cmd/authbridge/Dockerfile.proxy -t ghcr.io/kagenti/kagenti-extensions/authbridge:local .
+load_image_to_kind ghcr.io/kagenti/kagenti-extensions/authbridge:local
+echo "✅ Built and loaded: authbridge:local"
 echo ""
 
-# Build envoy-with-processor (Envoy runs as UID 1337)
+# Build authbridge-envoy (envoy-sidecar combined: Envoy + ext_proc + spiffe-helper)
 echo "=========================================="
-echo "Building envoy-with-processor"
+echo "Building authbridge-envoy (envoy-sidecar combined)"
 echo "=========================================="
-cd "${SCRIPT_DIR}/authbridge/authproxy"
-${CONTAINER_RUNTIME} build -f Dockerfile.envoy -t ghcr.io/kagenti/kagenti-extensions/envoy-with-processor:local .
-load_image_to_kind ghcr.io/kagenti/kagenti-extensions/envoy-with-processor:local
-echo "✅ Built and loaded: envoy-with-processor:local"
+cd "${SCRIPT_DIR}/authbridge"
+${CONTAINER_RUNTIME} build -f cmd/authbridge/Dockerfile.envoy -t ghcr.io/kagenti/kagenti-extensions/authbridge-envoy:local .
+load_image_to_kind ghcr.io/kagenti/kagenti-extensions/authbridge-envoy:local
+echo "✅ Built and loaded: authbridge-envoy:local"
 echo ""
 
-# Build proxy-init
+# Build proxy-init (iptables init container, used by envoy-sidecar mode only)
 echo "=========================================="
 echo "Building proxy-init"
 echo "=========================================="
@@ -102,8 +103,8 @@ echo "=========================================="
 echo ""
 echo "Images loaded into cluster '${CLUSTER_NAME}':"
 echo "  - ghcr.io/kagenti/kagenti/spiffe-idp-setup:local"
-echo "  - ghcr.io/kagenti/kagenti-extensions/client-registration:local"
-echo "  - ghcr.io/kagenti/kagenti-extensions/envoy-with-processor:local"
+echo "  - ghcr.io/kagenti/kagenti-extensions/authbridge:local"
+echo "  - ghcr.io/kagenti/kagenti-extensions/authbridge-envoy:local"
 echo "  - ghcr.io/kagenti/kagenti-extensions/proxy-init:local"
 echo ""
 echo "Next steps:"

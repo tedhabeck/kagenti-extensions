@@ -13,8 +13,9 @@ docker-build-init:
 	podman build -f Dockerfile.init -t proxy-init:latest .
 
 # Build demo Docker images (auth-proxy, demo-app, proxy-init).
-# The authbridge-unified sidecar image is built from cmd/authbridge/Dockerfile:
-#   cd authbridge && podman build -f cmd/authbridge/Dockerfile -t authbridge-unified:latest .
+# The combined sidecar images are built from authbridge/ context:
+#   cd authbridge && podman build -f cmd/authbridge/Dockerfile.proxy -t authbridge:latest .
+#   cd authbridge && podman build -f cmd/authbridge/Dockerfile.envoy -t authbridge-envoy:latest .
 build-images: docker-build-proxy docker-build-target docker-build-init
 
 # Load Docker images into kind cluster and re-tag for podman compatibility.
