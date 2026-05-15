@@ -195,6 +195,10 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 	// processing land in `default`. Without rekey those events stay
 	// orphaned while only the response goes to the contextId bucket.
 	// Mirrors extproc.rekeyInboundSession.
+	//
+	// Skip when SessionID is empty (auth-only or non-A2A response —
+	// no contextId to merge against) or already "default" (a no-op
+	// that would also collide with the source bucket name).
 	if s.Sessions != nil && pctx.Extensions.A2A != nil &&
 		pctx.Extensions.A2A.SessionID != "" &&
 		pctx.Extensions.A2A.SessionID != session.DefaultSessionID {
