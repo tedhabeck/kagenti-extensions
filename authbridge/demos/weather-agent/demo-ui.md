@@ -646,13 +646,13 @@ kubectl rollout status deployment weather-service -n team1 --timeout=120s
 
 ### Key differences
 
-| | envoy-sidecar (default) | proxy-sidecar |
+| | proxy-sidecar (default) | envoy-sidecar |
 |---|---|---|
-| Image | `authbridge-envoy` (140 MB) | `authbridge-light` (29 MB) |
-| Traffic interception | iptables + Envoy | HTTP_PROXY env vars |
-| Init container | proxy-init (NET_ADMIN) | None |
-| Container name | `envoy-proxy` | `authbridge-proxy` |
-| Ollama port exclusion | Required (annotation) | Not needed |
+| Image | `authbridge` (combined) | `authbridge-envoy` (combined) |
+| Traffic interception | HTTP_PROXY env vars | iptables + Envoy |
+| Init container | None | `proxy-init` (NET_ADMIN) |
+| Container name | `authbridge-proxy` | `envoy-proxy` |
+| Ollama port exclusion | Not needed | Required (annotation) |
 
 > **Note:** Proxy-sidecar mode requires the agent to read the `PORT` env var.
 > All agents in [kagenti/agent-examples](https://github.com/kagenti/agent-examples)

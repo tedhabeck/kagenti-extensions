@@ -1,5 +1,18 @@
 # Multi-Target Demo
 
+> **⚠️ This demo is currently broken after kagenti-extensions#411.** The
+> manifests in `k8s/` use the pre-#411 multi-sidecar pattern with images
+> that no longer publish (`authbridge-unified`, `client-registration`,
+> standalone `spiffe-helper`). Applying them yields ImagePullBackOff.
+> The build instructions below also reference Dockerfile paths that no
+> longer exist (`cmd/authbridge/Dockerfile`).
+>
+> The demo concept (route-based token exchange to multiple targets)
+> still applies, but the YAMLs need migration to the combined sidecar
+> shape (one `authbridge` / `authbridge-envoy` container per pod). Use
+> `authbridge/demos/weather-agent/demo-ui-advanced.md` or
+> `authbridge/demos/webhook/README.md` in the meantime.
+
 This demo shows AuthBridge performing route-based token exchange to multiple target services.
 
 ## Overview

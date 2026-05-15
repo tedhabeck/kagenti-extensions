@@ -1,3 +1,16 @@
+# ⚠️  BROKEN AFTER kagenti-extensions#411 — see ../demo.md and the demos
+# index README. This manifest uses the pre-#411 multi-sidecar pattern
+# (envoy-proxy + authbridge-light + client-registration + standalone
+# spiffe-helper as separate containers). Several of those images no
+# longer publish:
+#   - localhost/authbridge-unified:latest          (image gone — replaced by authbridge / authbridge-envoy combined images)
+#   - ghcr.io/kagenti/kagenti-extensions/client-registration:latest  (sidecar replaced by operator-managed registration)
+#   - ghcr.io/spiffe/spiffe-helper:nightly         (now bundled inside the combined sidecar images, started by SPIRE_ENABLED)
+#   - localhost/auth-proxy:latest                  (demo-app image; rebuild from authbridge/authproxy/quickstart/)
+# Applying this YAML today will produce ImagePullBackOff. Migration to
+# the combined-sidecar shape is tracked separately. Use the webhook or
+# weather-agent demos in the meantime.
+#
 # AuthBridge Demo Deployment (with SPIFFE)
 #
 # This deployment demonstrates:

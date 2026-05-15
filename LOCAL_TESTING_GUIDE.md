@@ -1,5 +1,23 @@
 # Local Testing Guide for JWT-SVID Authentication
 
+> **⚠️ This guide is stale after kagenti-extensions#411.** It was written
+> for the pre-#411 multi-sidecar shape (separate `client-registration`,
+> `envoy-with-processor`, and standalone `spiffe-helper` containers) and
+> several of its YAML examples reference images that no longer publish.
+> The image inventory at the top, the in-line pod spec, and the
+> "Check ... logs" sections all assume the legacy shape.
+>
+> **What still works**: the script invocation in §1 — `local-build-and-test.sh`
+> has been updated to build the three combined images (`authbridge`,
+> `authbridge-envoy`, `authbridge-lite`) plus `proxy-init`. The rest of
+> the guide needs a re-author against the operator-injected combined
+> sidecar shape; track via a follow-up issue.
+>
+> **Working alternatives in the meantime**:
+> - `authbridge/demos/weather-agent/demo-ui-advanced.md` — current
+>   reference for the combined-sidecar flow with SPIFFE.
+> - `authbridge/demos/webhook/README.md` — webhook-injected demo.
+
 This guide walks you through testing JWT-SVID authentication using local images (no push to ghcr.io).
 
 ## ⚠️ Important: Use the Build Script

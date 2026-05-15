@@ -14,17 +14,25 @@ See the [AuthBridge README](./authbridge/README.md) for architecture details and
 
 ## Container Images
 
-All images are published to `ghcr.io/kagenti/kagenti-extensions/`:
+All images are published to `ghcr.io/kagenti/kagenti-extensions/`. After
+kagenti-extensions#411 the unified binary was split into three
+mode-specific combined images, and the per-component sidecars
+(`client-registration`, standalone `spiffe-helper`) were retired:
 
 | Image | Description |
 |-------|-------------|
-| `authbridge-unified` | Unified Envoy + authbridge binary (recommended) |
-| `authbridge` | Combined sidecar (Envoy + authbridge + spiffe-helper + client-registration) |
-| `proxy-init` | Alpine + iptables init container |
-| `client-registration` | Python Keycloak client registrar |
-| `spiffe-helper` | Fetches SPIFFE credentials from SPIRE |
-| `auth-proxy` | Example pass-through proxy (for demos) |
-| `demo-app` | Demo target service |
+| `authbridge` | proxy-sidecar combined (default): authbridge-proxy + bundled spiffe-helper, full plugin set |
+| `authbridge-envoy` | envoy-sidecar combined: Envoy + ext_proc + bundled spiffe-helper, full plugin set |
+| `authbridge-lite` | proxy-sidecar shape, auth-only plugins (no parsers) for size-constrained deployments |
+| `proxy-init` | Alpine + iptables init container (envoy-sidecar mode only) |
+
+`spiffe-helper` is bundled inside each combined image and gated per
+workload by the `SPIRE_ENABLED` env var. Client registration is
+handled by the kagenti-operator's `ClientRegistrationReconciler` and
+no longer ships as a separate image. The legacy `authbridge-unified`,
+`authbridge-light`, `client-registration`, and standalone `spiffe-helper`
+images are no longer published; older release tags continue to
+publish the previous shape.
 
 ## Development
 

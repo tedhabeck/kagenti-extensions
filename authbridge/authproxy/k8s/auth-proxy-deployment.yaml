@@ -1,3 +1,10 @@
+# ⚠️  BROKEN AFTER kagenti-extensions#411 — references
+# localhost/authbridge-unified:latest which no longer publishes; the
+# unified binary was split into mode-specific combined images
+# (authbridge / authbridge-envoy / authbridge-lite). Applying this
+# YAML today will produce ImagePullBackOff. The standalone authproxy
+# quickstart needs migration to the combined sidecar shape; use the
+# webhook or weather-agent demos in the meantime.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

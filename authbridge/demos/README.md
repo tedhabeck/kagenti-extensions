@@ -4,9 +4,12 @@ This directory contains demo scenarios showing AuthBridge providing zero-trust
 authentication for Kubernetes agent workloads. Each demo progressively introduces
 more AuthBridge capabilities.
 
-> **Note:** These demos use the `authbridge-unified` image with operator-injected
-> sidecars. See [`cmd/authbridge/README.md`](../cmd/authbridge/README.md) for details
-> on the unified authbridge binary.
+> **Note:** These demos use the operator-injected combined sidecar (after
+> kagenti-extensions#411 — one image per mode: `authbridge` for proxy-sidecar,
+> `authbridge-envoy` for envoy-sidecar, `authbridge-lite` for the auth-only
+> shape). The previous `authbridge-unified` image and the per-component
+> sidecars (`client-registration`, standalone `spiffe-helper`) have been
+> removed.
 
 ## Available Demos
 
@@ -16,8 +19,17 @@ more AuthBridge capabilities.
 | **[Weather Agent (advanced)](weather-agent/demo-ui-advanced.md)** | Intermediate | Inbound on agent **and** tool, outbound token exchange, ingress JWT verification on the tool | [kubectl + script](weather-agent/demo-ui-advanced.md#automated-deploy-and-verify-ci-oriented) |
 | **[GitHub Issue Agent](github-issue/demo.md)** | Intermediate | Inbound validation + outbound token exchange + scope-based access control | [UI](github-issue/demo-ui.md) or [Manual](github-issue/demo-manual.md) |
 | **[Webhook](webhook/README.md)** | Intermediate | Webhook-based sidecar injection with auth-target demo app | Manual |
-| **[Single Target](single-target/demo.md)** | Advanced | Manual AuthBridge deployment (no webhook) with SPIFFE identity | Manual |
-| **[Multi-Target](multi-target/demo.md)** | Advanced | Route-based token exchange to multiple target services | Manual |
+| ~~**[Single Target](single-target/demo.md)**~~ ⚠️ | Advanced | Manual AuthBridge deployment (no webhook) with SPIFFE identity | Manual |
+| ~~**[Multi-Target](multi-target/demo.md)**~~ ⚠️ | Advanced | Route-based token exchange to multiple target services | Manual |
+
+> **⚠️ Single Target / Multi-Target demos are currently broken** after
+> kagenti-extensions#411. The YAMLs use the pre-#411 multi-sidecar pattern
+> (separate `envoy-proxy`, `authbridge-light`, `client-registration`, and
+> `spiffe-helper` containers) with images that no longer publish — applying
+> them yields ImagePullBackOff. They need migration to the combined sidecar
+> shape (one `authbridge` / `authbridge-envoy` container) before they're
+> usable again. Use the **Webhook** or **Weather Agent** demos in the
+> meantime.
 
 ## Recommended Path
 

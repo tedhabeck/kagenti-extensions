@@ -8,32 +8,25 @@ AuthBridge provides **secure, transparent token management** for Kubernetes work
 
 The [`cmd/authbridge/`](./cmd/authbridge/) directory contains a unified binary that supports three deployment modes in a single codebase. Two container images are published:
 
-| Image | Size | Contents |
-|-------|------|----------|
-| `authbridge-envoy` | 140 MB | Go binary + Envoy (UBI9-micro base) |
-| `authbridge-light` | 29 MB | Go binary only (distroless base) |
+| Image | Contents |
+|-------|----------|
+| `authbridge` | proxy-sidecar combined: authbridge-proxy binary + bundled spiffe-helper |
+| `authbridge-envoy` | envoy-sidecar combined: Envoy + ext_proc + bundled spiffe-helper |
+| `authbridge-lite` | proxy-sidecar shape, auth-only plugins (no parsers) |
 
 | Mode | Image | Use Case | How It Works |
 |------|-------|----------|-------------|
-| `envoy-sidecar` (default) | `authbridge-envoy` | Transparent interception via iptables | Envoy intercepts all traffic, delegates auth to authbridge via ext_proc gRPC |
-| `proxy-sidecar` | `authbridge-light` | Lightweight proxy via HTTP_PROXY env | Agent routes outbound traffic through forward proxy; reverse proxy validates inbound JWTs |
-| `waypoint` | `authbridge-light` | Shared proxy in Istio ambient mesh | Standalone deployment (not injected as sidecar) |
+| `proxy-sidecar` (default) | `authbridge` | HTTP_PROXY-based forward + reverse proxies | Agent routes outbound traffic through forward proxy; reverse proxy validates inbound JWTs |
+| `envoy-sidecar` | `authbridge-envoy` | Transparent interception via iptables | Envoy intercepts all traffic, delegates auth to authbridge via ext_proc gRPC |
+| `lite` | `authbridge-lite` | Same shape as proxy-sidecar with auth-only plugins (no parsers) | For size-constrained deployments that don't need protocol-aware session events |
 
-The operator selects the mode via the `kagenti.io/authbridge-mode` annotation on the workload. Default is `envoy-sidecar`. See [kagenti-operator PR #295](https://github.com/kagenti/kagenti-operator/pull/295) for the implementation.
-
-### Image naming
-
-| Name | Status |
-|------|--------|
-| `authbridge-envoy` | Canonical name for the Envoy variant |
-| `authbridge-light` | Lightweight variant (no Envoy) |
-| `authbridge-unified` | Deprecated alias for `authbridge-envoy` |
+The kagenti-operator resolves the mode per workload from `AgentRuntime.Spec.AuthBridgeMode` → namespace ConfigMap → deprecated `kagenti.io/authbridge-mode` annotation → cluster default (`proxy-sidecar`). See kagenti-operator#361.
 
 The shared auth library at [`authlib/`](./authlib/) contains the building blocks (JWT validation, token exchange, caching, routing) with no protocol dependencies. See [`authlib/README.md`](./authlib/README.md) for package reference.
 
 ## Architecture (Operator-Injected)
 
-The following describes the operator-injected sidecar deployment. The `authbridge-envoy` image replaces the legacy `envoy-with-processor` in envoy-sidecar mode. The `authbridge-light` image is used for proxy-sidecar mode.
+The following describes the operator-injected sidecar deployment. After kagenti-extensions#411 each mode is served by its own combined image (one container per pod, with `spiffe-helper` bundled inside and gated by `SPIRE_ENABLED`). The legacy `authbridge-unified`, `authbridge-light`, `envoy-with-processor`, and standalone `client-registration` / `spiffe-helper` sidecars are gone.
 
 ### What AuthBridge Does
 

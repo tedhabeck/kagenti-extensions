@@ -1,5 +1,14 @@
 # AuthBridge Demo Guide
 
+> **⚠️ This demo is currently broken after kagenti-extensions#411.** The
+> manifests in `k8s/` use the pre-#411 multi-sidecar pattern with images
+> that no longer publish (`authbridge-unified`, `client-registration`,
+> standalone `spiffe-helper`). Applying them yields ImagePullBackOff.
+> The demo needs migration to the combined sidecar shape (one
+> `authbridge` / `authbridge-envoy` container per pod). Use
+> `authbridge/demos/weather-agent/demo-ui-advanced.md` or
+> `authbridge/demos/webhook/README.md` in the meantime.
+
 This guide provides step-by-step instructions for running the AuthBridge demo.
 
 > **📘 New to AuthBridge?** See the [AuthBridge README](../../README.md) for an overview of what AuthBridge does and how it works.

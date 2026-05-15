@@ -6,25 +6,22 @@ This guide demonstrates how the **kagenti-operator** webhook automatically injec
 
 ## Overview
 
-The operator webhook watches for deployments with the `kagenti.io/inject: enabled` label and automatically injects AuthBridge sidecars. There are two injection modes controlled by the `combinedSidecar` feature gate:
+The operator webhook watches for deployments with the `kagenti.io/inject: enabled` label and automatically injects an AuthBridge sidecar. After kagenti-extensions#411 there is a single combined sidecar per mode (no more separate `envoy-proxy` + `spiffe-helper` + `client-registration` containers); the legacy multi-sidecar shape and the `combinedSidecar` feature gate are gone. The operator picks the mode per workload via `AgentRuntime.Spec.AuthBridgeMode` → namespace ConfigMap → deprecated annotation → cluster default (`proxy-sidecar`).
 
-### Separate mode (default: `combinedSidecar: false`)
+### proxy-sidecar mode (default)
+
+| Container | Purpose |
+|-----------|---------|
+| `authbridge-proxy` | Combined sidecar from the `authbridge` image. Runs the HTTP forward + reverse proxies with bundled `spiffe-helper`, gated per workload by `SPIRE_ENABLED`. |
+
+### envoy-sidecar mode
 
 | Container | Purpose |
 |-----------|---------|
 | `proxy-init` | Init container that sets up iptables to redirect inbound and outbound traffic |
-| `spiffe-helper` | Fetches SPIFFE credentials from SPIRE (only with `kagenti.io/spire: enabled`) |
-| `kagenti-client-registration` | Registers the workload with Keycloak (using SPIFFE ID or static client ID) |
-| `envoy-proxy` | Intercepts inbound HTTP requests (JWT validation) and outbound requests (HTTP: token exchange; HTTPS: TLS passthrough) |
+| `envoy-proxy` | Combined sidecar from the `authbridge-envoy` image. Runs Envoy + ext_proc + bundled `spiffe-helper`. |
 
-### Combined mode (`combinedSidecar: true`)
-
-| Container | Purpose |
-|-----------|---------|
-| `proxy-init` | Init container that sets up iptables (same as separate mode) |
-| `authbridge` | Single sidecar combining Envoy, authbridge, spiffe-helper, and client-registration |
-
-Combined mode reduces per-pod overhead from 3 long-running sidecars to 1, simplifies debugging, and speeds up pod startup. See [Enabling Combined Sidecar Mode](#enabling-combined-sidecar-mode) below.
+In both modes, Keycloak client registration is handled by the kagenti-operator's `ClientRegistrationReconciler` and the resulting `kagenti-keycloak-client-credentials-<hash>` Secret is mounted at `/shared/` by the webhook.
 
 ## Architecture
 
@@ -68,10 +65,9 @@ Combined mode reduces per-pod overhead from 3 long-running sidecars to 1, simpli
 2. **Keycloak** deployed in the `keycloak` namespace
 3. **SPIRE** deployed (optional, for SPIFFE-based identity)
 4. **AuthBridge images** available from GitHub Container Registry:
-   - `ghcr.io/kagenti/kagenti-extensions/proxy-init:latest`
-   - `ghcr.io/kagenti/kagenti-extensions/authbridge-unified:latest`
-   - `ghcr.io/kagenti/kagenti-extensions/demo-app:latest`
-   - `ghcr.io/kagenti/kagenti-extensions/client-registration:latest`
+   - `ghcr.io/kagenti/kagenti-extensions/authbridge:latest` (proxy-sidecar combined image)
+   - `ghcr.io/kagenti/kagenti-extensions/authbridge-envoy:latest` (envoy-sidecar combined image)
+   - `ghcr.io/kagenti/kagenti-extensions/proxy-init:latest` (envoy-sidecar mode only)
 
 ---
 
@@ -114,59 +110,31 @@ The ConfigMaps include:
 
 **Note**: All labels must be on the **Pod template** (`spec.template.metadata.labels`), not the Deployment metadata.
 
-## Enabling Combined Sidecar Mode
+## Mode selection
 
-To use the combined `authbridge` container instead of separate sidecars, enable the `combinedSidecar` feature gate:
+After kagenti-extensions#411 / kagenti-operator#361 the operator resolves AuthBridge mode per workload from this chain:
 
-### Via operator Helm values
+1. `AgentRuntime.Spec.AuthBridgeMode` on the workload's CR (canonical surface).
+2. `mode:` field on the namespace-level `authbridge-runtime-config` ConfigMap.
+3. The deprecated `kagenti.io/authbridge-mode` pod annotation (still honored).
+4. Cluster-wide default — `proxy-sidecar`.
 
-See the [kagenti-operator docs](https://github.com/kagenti/kagenti-operator) for Helm-based configuration.
+The previous `combinedSidecar` feature gate and the `envoyProxy` / `spiffeHelper` / `clientRegistration` per-sidecar gates were removed; their behavior was the legacy multi-sidecar shape that no longer exists. The legacy `kagenti.io/client-registration-inject: "true"` label is **no longer functional** — setting it today silently disables registration (the operator's `SkipReason` still honors it and steps aside, but the in-pod sidecar that was supposed to take over is gone). Do not add it to new manifests.
 
-### Via ConfigMap (for existing deployments)
-
-```bash
-# Edit the feature gates ConfigMap directly
-kubectl edit configmap kagenti-webhook-feature-gates -n kagenti-system
-```
-
-Add `combinedSidecar: true` to the `feature-gates.yaml` data key:
+To pick a mode for a specific workload, set it on the AgentRuntime CR:
 
 ```yaml
-data:
-  feature-gates.yaml: |
-    globalEnabled: true
-    envoyProxy: true
-    spiffeHelper: true
-    clientRegistration: true
-    combinedSidecar: true
+apiVersion: kagenti.io/v1alpha1
+kind: AgentRuntime
+metadata:
+  name: my-agent
+spec:
+  authBridgeMode: envoy-sidecar      # or proxy-sidecar / lite / waypoint
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: my-agent
 ```
-
-The webhook watches this ConfigMap for changes and reloads automatically. New pods created after the change will use combined mode. Existing pods are not affected — delete and recreate them to switch.
-
-### What changes
-
-| Aspect | Separate mode | Combined mode |
-|--------|---------------|---------------|
-| Sidecar containers | 3 (`envoy-proxy`, `spiffe-helper`, `kagenti-client-registration`) | 1 (`authbridge`)  |
-| Init containers | 1 (`proxy-init`) | 1 (`proxy-init`) |
-| Container to read credentials | `-c envoy-proxy` | `-c authbridge` |
-| Container for Envoy logs | `-c envoy-proxy` | `-c authbridge` |
-| Per-sidecar opt-out labels | Each sidecar can be independently disabled | `spiffeHelper` and `clientRegistration` are passed as flags to the entrypoint; `envoy-proxy` disabled = no combined container |
-| Image | `authbridge-unified` + `spiffe-helper` + `client-registration` | `authbridge` (single image) |
-
-### Per-sidecar control in combined mode
-
-When `combinedSidecar: true`, the per-sidecar feature gates and workload labels still work:
-
-- **`spiffeHelper: false`** or `kagenti.io/spiffe-helper-inject: "false"`: The combined container starts with `SPIRE_ENABLED=false` — spiffe-helper is not launched, and a static client ID is used instead.
-- **`clientRegistration: false`**: The combined container starts with `CLIENT_REGISTRATION_ENABLED=false` — client registration is skipped.
-- **Client registration**: operator-managed only. The legacy
-  `kagenti.io/client-registration-inject: "true"` label opted into an
-  in-pod `kagenti-client-registration` sidecar that was removed in
-  #411 — setting it today silently disables registration entirely
-  (the operator's `SkipReason` honors the label and steps aside, and
-  the legacy sidecar isn't there to take over). Don't set it.
-- **`envoyProxy: false`** or `kagenti.io/envoy-proxy-inject: "false"`: No combined container is injected at all (the proxy is the core component).
 
 Then continue with:
 - [Step 1: Setup Keycloak](#step-1-setup-keycloak) - Configure Keycloak clients and scopes
@@ -365,20 +333,21 @@ kubectl describe pod -l app=agent -n team1
 
 ### Check Container Logs
 
-**Separate mode** (default):
+**proxy-sidecar mode** (default):
 ```bash
-kubectl logs deployment/agent -n team1 -c kagenti-client-registration
-kubectl logs deployment/agent -n team1 -c envoy-proxy | grep -E "(Token Exchange|error)"
-kubectl logs deployment/agent -n team1 -c spiffe-helper
+# All sidecar logs are in one container — the combined image bundles
+# spiffe-helper internally, and operator-managed client registration
+# logs live in the kagenti-operator deployment in kagenti-system.
+kubectl logs deployment/agent -n team1 -c authbridge-proxy
+kubectl logs deployment/agent -n team1 -c authbridge-proxy | grep -iE "token.exchange|error"
 ```
 
-**Combined mode** (`combinedSidecar: true`):
+**envoy-sidecar mode**:
 ```bash
-# All sidecar logs are in one container
-kubectl logs deployment/agent -n team1 -c authbridge
-# Filter by component
-kubectl logs deployment/agent -n team1 -c authbridge | grep "\[AuthBridge\]"
-kubectl logs deployment/agent -n team1 -c authbridge | grep "Token Exchange"
+kubectl logs deployment/agent -n team1 -c envoy-proxy
+kubectl logs deployment/agent -n team1 -c envoy-proxy | grep -iE "token.exchange|error"
+# Operator-managed registration:
+kubectl logs deployment/kagenti-controller-manager -n kagenti-system | grep -i clientregistration
 ```
 
 ### Common Issues
@@ -392,14 +361,10 @@ kubectl logs deployment/agent -n team1 -c authbridge | grep "Token Exchange"
 
 3. **Image pull errors**
    - Images are automatically pulled from `ghcr.io/kagenti/kagenti-extensions/`
-   - If you need to build locally for development:
-     ```bash
-     cd authbridge/authproxy
-     make build
-     # Load into Kind cluster
-     kind load docker-image --name <cluster> localhost/proxy-init:latest
-     kind load docker-image --name <cluster> localhost/authbridge-unified:latest
-     ```
+   - If you need to build locally for development, see `local-build-and-test.sh`
+     at the repo root, which builds the post-#411 image set
+     (`authbridge`, `authbridge-envoy`, `authbridge-lite`, `proxy-init`)
+     and loads them into the cluster.
    - See the [kagenti-operator](https://github.com/kagenti/kagenti-operator) for image configuration
 
 4. **SPIFFE credentials not ready**
