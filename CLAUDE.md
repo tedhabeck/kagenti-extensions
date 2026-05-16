@@ -257,7 +257,6 @@ cd authbridge && podman build -f cmd/authbridge-lite/Dockerfile  -t authbridge-l
 3. See the [AuthBridge demos index](authbridge/demos/README.md) for a recommended learning path:
    - **Getting started**: `authbridge/demos/weather-agent/demo-ui.md` (inbound validation, UI deployment)
    - **Full flow**: `authbridge/demos/github-issue/demo-ui.md` (token exchange + scope-based access)
-   - **Routes config reference**: `authbridge/demos/token-exchange-routes/README.md`
    - **Routes config reference**: `authbridge/demos/token-exchange-routes/README.md` (single + multi-target route patterns)
 
 ### Adding a New Component Image to CI
