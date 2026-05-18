@@ -10,5 +10,8 @@ RUN CGO_ENABLED=0 go build -o /out/agent ./agent
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/agent /agent
-EXPOSE 8080
+# The agent listens on whatever PORT env says, defaulting to 8080.
+# In the IBAC demo Pod we set PORT=8000 to leave 8080 for the
+# authbridge sidecar's reverse proxy. EXPOSE is documentation-only;
+# leaving it off avoids implying a port the operator hasn't picked.
 ENTRYPOINT ["/agent"]

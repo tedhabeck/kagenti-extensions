@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,13 +21,26 @@ import (
 // surfaced in Invocation.Details so operators can see why a request was
 // blocked without re-running the judge.
 //
-// An error from Evaluate is treated as a hard fail-closed by the plugin
-// (judge unavailable → block). Implementations should return errors for
-// transport/parse failures and only return verdict="deny" for actual
-// policy denials.
+// Errors are categorized so the plugin can surface the right code:
+//
+//   - errors.Is(err, ErrJudgeUncertain) — judge ran but emitted an
+//     unparseable / ambiguous response. Treated as a fail-closed deny
+//     (HTTP 403 ibac.judge_uncertain) — different from "judge down"
+//     so operators don't conflate model-output bugs with infra outages.
+//
+//   - any other error — transport failure, timeout, 5xx from the
+//     judge endpoint. Treated as judge unavailable (HTTP 503
+//     ibac.judge_unavailable).
+//
+// Implementations only return verdict="deny" for actual policy denials.
 type Judge interface {
 	Evaluate(ctx context.Context, intent, action string) (verdict, reason string, err error)
 }
+
+// ErrJudgeUncertain is the sentinel returned (wrapped) when the judge
+// produced output we couldn't extract a verdict from. The plugin uses
+// errors.Is to distinguish this from transport/timeout failures.
+var ErrJudgeUncertain = errors.New("judge produced unparseable output")
 
 // httpJudge calls an OpenAI chat-completions-compatible endpoint with a
 // system+user prompt asking the model to compare intent vs action and
@@ -157,7 +171,7 @@ func (j *httpJudge) Evaluate(ctx context.Context, intent, action string) (string
 		return "", "", fmt.Errorf("decode judge response: %w", err)
 	}
 	if len(cr.Choices) == 0 {
-		return "", "", fmt.Errorf("judge response has no choices")
+		return "", "", fmt.Errorf("%w: judge response had no choices", ErrJudgeUncertain)
 	}
 
 	verdict, reason, err := parseVerdict(cr.Choices[0].Message.Content)
@@ -170,19 +184,26 @@ func (j *httpJudge) Evaluate(ctx context.Context, intent, action string) (string
 // parseVerdict pulls the {verdict, reason} object out of the model's
 // raw content. Models often wrap JSON in markdown code fences or prefix
 // it with prose; we extract the first {...} block before unmarshaling.
+//
+// All failure modes wrap ErrJudgeUncertain so the caller can route them
+// to a fail-closed-deny (403) instead of judge-unavailable (503): the
+// judge is up and responded, it just produced something we can't act on.
 func parseVerdict(content string) (string, string, error) {
 	start := strings.Index(content, "{")
 	end := strings.LastIndex(content, "}")
 	if start < 0 || end <= start {
-		return "", "", fmt.Errorf("no JSON object in judge content: %q", truncate(content, 200))
+		return "", "", fmt.Errorf("%w: no JSON object in content: %q",
+			ErrJudgeUncertain, truncate(content, 200))
 	}
 	var p verdictPayload
 	if err := json.Unmarshal([]byte(content[start:end+1]), &p); err != nil {
-		return "", "", fmt.Errorf("unmarshal verdict: %w (content %q)", err, truncate(content, 200))
+		return "", "", fmt.Errorf("%w: unmarshal: %v (content %q)",
+			ErrJudgeUncertain, err, truncate(content, 200))
 	}
 	v := strings.ToLower(strings.TrimSpace(p.Verdict))
 	if v != "allow" && v != "deny" {
-		return "", "", fmt.Errorf("unrecognized verdict %q (content %q)", p.Verdict, truncate(content, 200))
+		return "", "", fmt.Errorf("%w: unrecognized verdict %q (content %q)",
+			ErrJudgeUncertain, p.Verdict, truncate(content, 200))
 	}
 	return v, strings.TrimSpace(p.Reason), nil
 }

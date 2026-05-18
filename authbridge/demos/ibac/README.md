@@ -101,18 +101,17 @@ The agent Pod always mounts a single ConfigMap, `ibac-agent-config`, at `/etc/au
 - `k8s/configs/no-ibac.yaml` — baseline (`a2a-parser` inbound, `mcp-parser` outbound; **no** `ibac`)
 - `k8s/configs/ibac.yaml` — same plus `ibac` appended to the outbound chain
 
-`make deploy` bootstraps `ibac-agent-config` from the no-ibac source. Each toggle target stamps it from the desired source:
+`make deploy` bootstraps `ibac-agent-config` from the no-ibac source. Each toggle target stamps it from the desired source and restarts the agent Deployment so the new pod picks up the new config from a clean start:
 
 ```sh
 kubectl create configmap ibac-agent-config \
     --from-file=config.yaml=k8s/configs/{no-ibac,ibac}.yaml \
     --dry-run=client -o yaml \
   | kubectl apply -f -
+kubectl rollout restart deploy/ibac-agent
 ```
 
-Then sleep ~10s for authbridge's filesystem watcher to detect the mounted-file change and rebuild the pipeline (authbridge logs `reloader: pipelines swapped` when this finishes), send the A2A attack via a transient `curlimages/curl` Pod, and print the evil-server logs.
-
-This is the simplest possible toggle. In production deployments, the operator owns the ConfigMap; the operational pattern is to `kubectl patch` it via your CD tooling.
+Authbridge supports filesystem-watch hot-reload, but with the demo's strict `securityContext` (`readOnlyRootFilesystem` + `nonroot`) the fsnotify watcher doesn't reliably catch ConfigMap symlink-swap events on the projected volume. `kubectl rollout restart` is bulletproof — it costs ~10s of startup time per toggle but is predictable. In production, the operator owns the ConfigMap and you'd `kubectl patch` it via your CD tooling; depending on the workload's security profile, hot-reload might or might not work.
 
 ## What the attack looks like
 
@@ -259,7 +258,22 @@ If you don't see this, the config file change wasn't detected — either the Con
 
 **The judge is too slow / times out.** llama3.2:3b on a small machine can take 10-20s. Bump `timeout_ms` in `k8s/configs/ibac.yaml`. Or use a smaller / quantized model (and re-run `make demo-ibac` to re-stamp the ConfigMap).
 
-**Agent can't reach ollama.** `host.docker.internal` works on Docker Desktop and most kind setups. On a non-Docker-Desktop kind cluster you may need to run ollama in-cluster — change `OLLAMA_URL` in `k8s/agent.yaml` and `judge_endpoint` in `k8s/configs/ibac.yaml` to a service URL.
+**Agent can't reach ollama.** `host.docker.internal` works on Docker Desktop (macOS / Windows) and on Linux kind clusters created with an explicit `extraHostMappings` entry pointing at the host. On plain-Docker Linux without that mapping, the hostname won't resolve. Two fixes:
+
+- Run kind with the host mapping. Save this as `kind-config.yaml` then `kind create cluster --name kagenti --config kind-config.yaml`:
+  ```yaml
+  kind: Cluster
+  apiVersion: kind.x-k8s.io/v1alpha4
+  nodes:
+    - role: control-plane
+      extraHostMappings:
+        - hostPath: /etc/hosts            # any host file
+          containerPath: /etc/hosts.host  # informational
+      # If your kind version supports it, the cleaner option is:
+      # extraPortMappings + a host-network sidecar; see kind docs.
+  ```
+  Easier: deploy ollama in-cluster (next bullet).
+- Run ollama in-cluster. Deploy it as a Pod / Service in any namespace, then change `OLLAMA_URL` in `k8s/agent.yaml` and `judge_endpoint` in `k8s/configs/ibac.yaml` from `http://host.docker.internal:11434` to e.g. `http://ollama.ollama.svc.cluster.local:11434`. You'll also need to update the agent's NetworkPolicy egress to allow the new destination, and add the in-cluster ollama hostname to the IBAC `bypass_hosts` list.
 
 **Without-IBAC run shows "no exfiltration".** llama3.2:3b is small enough that it doesn't always follow the injection on the first try. The agent has a fallback that escalates the prompt; if you still see no exfil, try a larger model (`llama3.2:8b` or similar) and rebuild.
 
@@ -270,6 +284,37 @@ If you don't see this, the config file change wasn't detected — either the Con
 - **No `ibac` row at all** — the request bypassed IBAC. Check `bypass_hosts` / `bypass_paths` in `k8s/configs/ibac.yaml` for an unintended match.
 
 **`make build-authbridge` fails on the COPY step.** The build context is `authbridge/`, two directories up. Confirm you're running `make` from `authbridge/demos/ibac/` (the Makefile's `cd ../..` is relative to that).
+
+## Defense-in-depth: NetworkPolicy
+
+`k8s/networkpolicy.yaml` layers a default-deny-ingress posture plus an explicit egress allow-list on the agent Pod. The agent can reach exactly:
+
+- `ibac-email-server:8888` (poisoned content source)
+- `ibac-evil-server:9999` (exfil target)
+- `host.docker.internal:11434` (ollama — agent's own LLM and IBAC's judge)
+- DNS
+
+Why include it: the demo's claim is "**IBAC** is blocking the exfil". Without a NetworkPolicy that explicitly allows agent → evil-server, a sceptical reviewer could argue "of course evil-server is unreachable, the network was already isolating it". The policy makes the attack flow EXPLICITLY allowed at the network layer; only IBAC's plugin-level decision blocks it. When you see `evil-server` logs stay empty under `make demo-ibac`, you know it's IBAC.
+
+The policy is intentionally narrow: ingress restrictions on every pod, egress restriction on the agent only. The transient attacker pod the Makefile spins up has no labels we can target with an explicit egress allow, so leaving its egress open avoids breaking the demo.
+
+Some kind clusters (depending on the `kindnet` build / version) DO enforce NetworkPolicy; others don't. Either way the manifest is a teaching example — production clusters with Calico / Cilium / antrea / etc. enforce reliably.
+
+## Defense-in-depth: securityContext
+
+Each container declares an explicit Pod-Security-Standard "restricted" profile:
+
+```yaml
+securityContext:
+  runAsNonRoot: true
+  seccompProfile: { type: RuntimeDefault }
+# per container:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities: { drop: ["ALL"] }
+```
+
+Distroless `nonroot` images set the user implicitly so the runtime is fine without these — but for a demo whose whole point is security posture, the explicit profile is worth copying verbatim.
 
 ## What this demo doesn't cover
 

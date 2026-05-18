@@ -92,6 +92,19 @@ var defaultBypassHosts = []string{
 	"prometheus.*",
 }
 
+// defaultBypassPaths is IBAC's path-bypass starting set. Mirrors
+// shape of defaultBypassHosts (a small list owned by this plugin)
+// rather than reusing bypass.DefaultPatterns: that list is documented
+// for inbound JWT validation, and IBAC is outbound-only — coupling
+// our defaults to it would mean a future jwt-validation tweak
+// silently changes IBAC behavior.
+var defaultBypassPaths = []string{
+	"/healthz",
+	"/readyz",
+	"/livez",
+	"/.well-known/*",
+}
+
 func (c *ibacConfig) applyDefaults() {
 	if c.TimeoutMs == 0 {
 		c.TimeoutMs = 5000
@@ -103,7 +116,7 @@ func (c *ibacConfig) applyDefaults() {
 		c.BypassHosts = append(c.BypassHosts, c.AgentLLMHost)
 	}
 	if len(c.BypassPaths) == 0 {
-		c.BypassPaths = bypass.DefaultPatterns
+		c.BypassPaths = defaultBypassPaths
 	}
 }
 
@@ -120,6 +133,24 @@ func (c *ibacConfig) validate() error {
 	for _, p := range c.BypassHosts {
 		if _, err := path.Match(p, ""); err != nil {
 			return fmt.Errorf("invalid bypass_hosts pattern %q: %w", p, err)
+		}
+		// Reject footgun patterns that would short-circuit every host
+		// to a bypass — clearly an operator mistake (e.g. they typed
+		// "*" hoping it meant "all hosts I haven't listed elsewhere").
+		// Empty-string and whitespace-only entries fall in the same
+		// bucket: trivially-true matches that disable the plugin.
+		if trimmed := strings.TrimSpace(p); trimmed == "" || trimmed == "*" {
+			return fmt.Errorf("bypass_hosts pattern %q matches everything; "+
+				"if you mean to disable IBAC, remove it from the pipeline instead", p)
+		}
+	}
+	for _, p := range c.BypassPaths {
+		if _, err := path.Match(p, "/"); err != nil {
+			return fmt.Errorf("invalid bypass_paths pattern %q: %w", p, err)
+		}
+		if trimmed := strings.TrimSpace(p); trimmed == "" || trimmed == "*" || trimmed == "/*" {
+			return fmt.Errorf("bypass_paths pattern %q matches everything; "+
+				"if you mean to disable IBAC, remove it from the pipeline instead", p)
 		}
 	}
 	return nil
@@ -237,20 +268,44 @@ func (p *IBAC) OnRequest(ctx context.Context, pctx *pipeline.Context) pipeline.A
 	action := describeAction(pctx, p.cfg.JudgeInference)
 	verdict, reason, err := p.judge.Evaluate(ctx, intentText, action)
 
-	// 7. Fail-closed on judge transport / parse errors.
+	// 7. Fail closed on judge errors. Two flavors, distinguished
+	//    via the ErrJudgeUncertain sentinel so operator dashboards
+	//    don't conflate model-output bugs with infra outages:
+	//      - uncertain: judge is up but emitted unparseable / unknown
+	//        verdict → 403 ibac.judge_uncertain (true policy-deny)
+	//      - unavailable: transport / timeout / 5xx → 503
+	//        ibac.judge_unavailable (availability issue)
+	//    Truncate err.Error() before logging because httpJudge embeds
+	//    up to 2 KB of upstream response on 5xx — full body in slog
+	//    is wasteful and noisy.
 	if err != nil {
+		errPreview := truncate(err.Error(), 240)
+		if errors.Is(err, ErrJudgeUncertain) {
+			pctx.Record(pipeline.Invocation{
+				Action: pipeline.ActionDeny,
+				Phase:  pipeline.InvocationPhaseRequest,
+				Reason: "judge_uncertain",
+				Details: map[string]string{
+					"action":      action,
+					"judge_error": errPreview,
+				},
+			})
+			slog.Warn("ibac: judge uncertain, failing closed",
+				"path", pctx.Path, "host", pctx.Host, "error", errPreview)
+			return pipeline.DenyStatus(403, "ibac.judge_uncertain", errPreview)
+		}
 		pctx.Record(pipeline.Invocation{
 			Action: pipeline.ActionDeny,
 			Phase:  pipeline.InvocationPhaseRequest,
 			Reason: "judge_unavailable",
 			Details: map[string]string{
 				"action":      action,
-				"judge_error": err.Error(),
+				"judge_error": errPreview,
 			},
 		})
 		slog.Warn("ibac: judge unavailable, failing closed",
-			"path", pctx.Path, "host", pctx.Host, "error", err)
-		return pipeline.DenyStatus(503, "ibac.judge_unavailable", err.Error())
+			"path", pctx.Path, "host", pctx.Host, "error", errPreview)
+		return pipeline.DenyStatus(503, "ibac.judge_unavailable", errPreview)
 	}
 
 	// 8. Apply verdict.
@@ -348,7 +403,13 @@ func describeAction(pctx *pipeline.Context, judgeInference bool) string {
 		}
 	}
 
-	return b.String()
+	// Per-section caps prevent any single field from blowing the
+	// budget, but the assembled string can still grow if every
+	// optional section is populated. Cap the total at 4 KB so the
+	// judge prompt + headers stays well under typical LLM context
+	// limits even with a verbose body excerpt.
+	const maxActionLen = 4096
+	return preview(b.String(), maxActionLen)
 }
 
 // formatBodyExcerpt returns up to n bytes of body. If the body parses
@@ -360,9 +421,11 @@ func formatBodyExcerpt(body []byte, n int) string {
 		body = body[:n]
 	}
 	// Try JSON pretty-print first; if it fails, fall back to %q.
-	var any interface{}
-	if json.Unmarshal(body, &any) == nil {
-		if pretty, err := json.MarshalIndent(any, "", "  "); err == nil {
+	// `v any` rather than `var any interface{}` because the latter
+	// shadows Go's built-in `any` alias (golangci-lint predeclared).
+	var v any
+	if json.Unmarshal(body, &v) == nil {
+		if pretty, err := json.MarshalIndent(v, "", "  "); err == nil {
 			return string(pretty)
 		}
 	}

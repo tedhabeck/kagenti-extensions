@@ -20,6 +20,10 @@ spec:
       labels:
         app.kubernetes.io/name: ibac-evil-server
     spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: evil-server
           image: ibac-evil-server:latest
@@ -27,6 +31,11 @@ spec:
           ports:
             - containerPort: 9999
               name: http
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           resources:
             limits:
               cpu: 100m

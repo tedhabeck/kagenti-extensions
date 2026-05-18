@@ -41,6 +41,14 @@ build-images:
 	$(CONTAINER_RUNTIME) build -f evil-server/Dockerfile  -t $(EVIL_IMAGE)  .
 
 build-authbridge:
+	@# Fail loudly if invoked from outside authbridge/demos/ibac/.
+	@# Without this guard the cd ../.. lands somewhere arbitrary
+	@# and the user gets a confusing podman build error.
+	@test -f ../../cmd/authbridge-proxy/Dockerfile || { \
+	  echo "build-authbridge must be run from authbridge/demos/ibac/"; \
+	  echo "(expected ../../cmd/authbridge-proxy/Dockerfile to exist)"; \
+	  exit 1; \
+	}
 	cd ../.. && $(CONTAINER_RUNTIME) build \
 	  -f cmd/authbridge-proxy/Dockerfile -t $(AUTHBRIDGE_IMAGE) .
 
@@ -63,6 +71,7 @@ endif
 
 deploy:
 	kubectl apply -f k8s/namespace.yaml
+	kubectl apply -f k8s/networkpolicy.yaml
 	kubectl apply -f k8s/email-server.yaml
 	kubectl apply -f k8s/evil-server.yaml
 	# Bootstrap the authbridge ConfigMap with the no-ibac baseline.
@@ -86,13 +95,19 @@ undeploy:
 
 # The agent Pod always mounts ibac-agent-config. The toggle targets
 # regenerate that single ConfigMap from one of the two source files
-# under k8s/configs/. Authbridge's config hot-reload watches the
-# mounted file and rebuilds the pipeline without a pod restart.
+# under k8s/configs/, then trigger a rollout restart so the new pod
+# picks up the new config from a clean start.
+#
+# Authbridge supports filesystem-watch hot-reload, but with the demo's
+# strict securityContext (readOnlyRootFilesystem + nonroot) the
+# fsnotify watcher doesn't reliably catch ConfigMap symlink-swap
+# events on the projected volume. `kubectl rollout restart` is
+# bulletproof — costs ~10s of startup time per toggle, predictable.
 #
 # `kubectl create cm --from-file --dry-run=client | kubectl apply`
 # is the idiomatic "stamp this ConfigMap to exactly this content"
-# pattern — it sidesteps the resource-version conflicts you get when
-# trying to copy data between two existing ConfigMaps via apply.
+# pattern — it sidesteps resource-version conflicts you'd hit trying
+# to copy data between two existing ConfigMaps via apply.
 toggle-no-ibac:
 	@echo "[*] Switching authbridge config -> NO IBAC (baseline)"
 	kubectl -n $(NAMESPACE) create configmap ibac-agent-config \
@@ -101,8 +116,8 @@ toggle-no-ibac:
 	  | kubectl apply -f -
 	kubectl -n $(NAMESPACE) annotate cm ibac-agent-config \
 	  ibac-demo/active=no-ibac --overwrite
-	@echo "[*] Waiting 10s for hot-reload to settle..."
-	@sleep 10
+	kubectl -n $(NAMESPACE) rollout restart deploy/ibac-agent
+	kubectl -n $(NAMESPACE) rollout status deploy/ibac-agent --timeout=60s
 
 toggle-ibac:
 	@echo "[*] Switching authbridge config -> IBAC ENABLED"
@@ -112,8 +127,8 @@ toggle-ibac:
 	  | kubectl apply -f -
 	kubectl -n $(NAMESPACE) annotate cm ibac-agent-config \
 	  ibac-demo/active=ibac --overwrite
-	@echo "[*] Waiting 10s for hot-reload to settle..."
-	@sleep 10
+	kubectl -n $(NAMESPACE) rollout restart deploy/ibac-agent
+	kubectl -n $(NAMESPACE) rollout status deploy/ibac-agent --timeout=60s
 
 # ---------- Demo runs ----------
 

@@ -3,6 +3,7 @@ package ibac
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -214,6 +215,42 @@ func TestParseVerdict_ExtractsFromVariousShapes(t *testing.T) {
 				t.Errorf("verdict = %q, want %q", v, tc.wantVerdict)
 			}
 		})
+	}
+}
+
+// Verify the per-call timeout is actually enforced. A judge endpoint
+// that never responds must trip the http.Client.Timeout — without this
+// the plugin would wait indefinitely on a wedged judge LLM and tie up
+// the plugin pipeline goroutine. The error is NOT ErrJudgeUncertain
+// (the judge didn't respond at all, so it's an availability issue).
+func TestHTTPJudge_TimeoutEnforced(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Sleep longer than the judge timeout. The CloseNotify channel
+		// lets the goroutine exit when the test server tears down.
+		select {
+		case <-time.After(5 * time.Second):
+		case <-r.Context().Done():
+		}
+	}))
+	defer srv.Close()
+
+	start := time.Now()
+	j := newHTTPJudge(srv.URL, "m", "", "", 200*time.Millisecond)
+	_, _, err := j.Evaluate(context.Background(), "i", "a")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("Evaluate returned nil error after slow-server timeout; expected fail-closed signal")
+	}
+	if elapsed > 1500*time.Millisecond {
+		t.Errorf("Evaluate took %v, expected the 200ms timeout to trip well before 1.5s", elapsed)
+	}
+	// The judge didn't respond at all — this is an availability issue,
+	// not an "uncertain output" case. ErrJudgeUncertain must NOT be
+	// part of this error chain.
+	if errors.Is(err, ErrJudgeUncertain) {
+		t.Errorf("timeout error wrongly wrapped ErrJudgeUncertain; "+
+			"plugin would route this to 403 instead of 503. err=%v", err)
 	}
 }
 

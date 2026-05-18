@@ -48,6 +48,13 @@ spec:
         app.kubernetes.io/name: ibac-agent
     spec:
       serviceAccountName: ibac-agent
+      # Distroless nonroot images set runAsUser implicitly, but a
+      # security-themed demo deserves an explicit policy so readers
+      # can copy the snippet verbatim.
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         # ----- Agent (the email assistant with vulnerable tools) -----
         - name: agent
@@ -74,6 +81,11 @@ spec:
               value: "llama3.2:3b"
             - name: EMAIL_URL
               value: "http://ibac-email-server.ibac-demo.svc.cluster.local:8888"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           resources:
             limits:
               cpu: 500m
@@ -111,10 +123,21 @@ spec:
               value: "false"
             - name: LOG_LEVEL
               value: "INFO"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           volumeMounts:
             - name: config
               mountPath: /etc/authbridge
               readOnly: true
+            # Writable /tmp for the alpine-based authbridge image.
+            # The binary itself doesn't write here, but with
+            # readOnlyRootFilesystem some shell / TLS-cert temp use
+            # would otherwise EROFS. Costs nothing to provide.
+            - name: tmp
+              mountPath: /tmp
           resources:
             limits:
               cpu: 500m
@@ -130,6 +153,8 @@ spec:
             items:
               - key: config.yaml
                 path: config.yaml
+        - name: tmp
+          emptyDir: {}
 
 ---
 apiVersion: v1

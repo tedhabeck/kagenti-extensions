@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -419,6 +420,31 @@ func TestOnRequest_JudgeError_503(t *testing.T) {
 	inv := lastInvocation(t, pctx)
 	if inv.Reason != "judge_unavailable" {
 		t.Errorf("reason = %q, want 'judge_unavailable'", inv.Reason)
+	}
+}
+
+// Judge "uncertain" errors (parse / unrecognized verdict) fail closed
+// with a DIFFERENT code: 403 ibac.judge_uncertain rather than 503
+// ibac.judge_unavailable. The judge IS up — it just emitted output
+// we can't act on. Routing this through "unavailable" would inflate
+// the "judge down" metric on every model misbehavior.
+func TestOnRequest_JudgeUncertain_403(t *testing.T) {
+	fj := &fakeJudge{err: fmt.Errorf("%w: model emitted gibberish", ErrJudgeUncertain)}
+	p := newConfiguredIBAC(t, fj)
+
+	pctx := makePCtx(t)
+	action := invokeOnRequest(p, pctx)
+
+	if action.Type != pipeline.Reject {
+		t.Fatalf("got %v, want Reject on judge_uncertain", action.Type)
+	}
+	if action.Violation.Status != 403 {
+		t.Errorf("Violation.Status = %d, want 403 (uncertain judge output is a fail-closed deny, not infra outage)",
+			action.Violation.Status)
+	}
+	inv := lastInvocation(t, pctx)
+	if inv.Reason != "judge_uncertain" {
+		t.Errorf("reason = %q, want 'judge_uncertain'", inv.Reason)
 	}
 }
 

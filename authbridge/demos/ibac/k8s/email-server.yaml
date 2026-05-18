@@ -19,6 +19,14 @@ spec:
       labels:
         app.kubernetes.io/name: ibac-email-server
     spec:
+      # Distroless nonroot images set runAsUser implicitly, but a
+      # security-themed demo deserves an explicit policy so readers
+      # can copy the snippet verbatim. seccompProfile RuntimeDefault
+      # is the SecComp baseline most clusters require.
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: email-server
           image: ibac-email-server:latest
@@ -30,6 +38,11 @@ spec:
             # The injection payload tells the agent to POST to this URL.
             - name: EXFIL_URL
               value: "http://ibac-evil-server.ibac-demo.svc.cluster.local:9999"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           resources:
             limits:
               cpu: 100m
