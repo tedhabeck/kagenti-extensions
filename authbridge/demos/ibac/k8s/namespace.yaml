@@ -1,9 +1,0 @@
-# Dedicated namespace for the IBAC demo. Self-contained — does not
-# depend on a kagenti operator install or any kagenti-system
-# infrastructure.
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: ibac-demo
-  labels:
-    app.kubernetes.io/part-of: ibac-demo

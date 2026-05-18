@@ -1,39 +1,35 @@
-# IBAC demo email-assistant agent — fully self-contained.
+# IBAC demo email-assistant agent — operator-injected, kagenti-UI-discoverable.
 #
-# The authbridge sidecar mounts ibac-agent-config (config.yaml). This
-# ConfigMap is created on demand by the Makefile from one of the two
-# files under k8s/configs/:
+# Required labels for this agent to show up in the kagenti UI:
+#   kagenti.io/type: agent           — UI lists agents by this label
+#   kagenti.io/inject: enabled       — operator's webhook injects authbridge
+#   kagenti.io/spire: disabled       — demo doesn't depend on SPIRE identity
+#   protocol.kagenti.io/a2a: ""      — declares A2A protocol for the chat flow
 #
-#   k8s/configs/no-ibac.yaml — a2a-parser inbound, mcp-parser outbound.
-#                              NO ibac plugin. Baseline (exfil succeeds).
-#   k8s/configs/ibac.yaml    — same plus ibac in the outbound chain.
-#                              Judge denies misaligned outbound.
+# The operator's webhook port-steals: it sees containerPort 8000 here,
+# rewrites the agent's port to 8001, and sets PORT=8001 + HTTP_PROXY so
+# the agent's outbound flows through the injected authbridge sidecar's
+# forward proxy on :8081. Inbound traffic from the kagenti backend
+# hits the Service on :8080, which the operator points at the sidecar's
+# reverse proxy on :8000, which forwards to the agent on :8001.
 #
-# `make deploy` creates the ConfigMap from no-ibac.yaml as the initial
-# state; `make demo-ibac` / `make demo-no-ibac` rewrite it via
-# `kubectl create configmap --from-file --dry-run | kubectl apply`.
-# Authbridge's filesystem-watch hot-reload picks up the change without
-# a pod restart.
-#
-# This manifest does NOT depend on the kagenti operator. The
-# authbridge sidecar is declared inline so the demo runs against any
-# kind / minikube cluster after `make deploy`. The image references
-# `authbridge:demo` — see Makefile for build instructions; the demo
-# does NOT pull a published authbridge image because it must include
-# the IBAC plugin from this branch.
+# We do NOT ship a per-agent authbridge ConfigMap here — the operator
+# creates `authbridge-config-ibac-agent` automatically. The Makefile's
+# patch-ibac-config.sh runs after deploy to add a2a-parser inbound
+# (cross-chain dep IBAC needs to read user intent) and ibac outbound.
 
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: ibac-agent
-  namespace: ibac-demo
+  namespace: team1
 
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: ibac-agent
-  namespace: ibac-demo
+  namespace: team1
   labels:
     app.kubernetes.io/name: ibac-agent
     app.kubernetes.io/part-of: ibac-demo
@@ -46,17 +42,18 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: ibac-agent
+        app.kubernetes.io/part-of: ibac-demo
+        kagenti.io/type: agent
+        kagenti.io/inject: enabled
+        kagenti.io/spire: disabled
+        protocol.kagenti.io/a2a: ""
     spec:
       serviceAccountName: ibac-agent
-      # Distroless nonroot images set runAsUser implicitly, but a
-      # security-themed demo deserves an explicit policy so readers
-      # can copy the snippet verbatim.
       securityContext:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
       containers:
-        # ----- Agent (the email assistant with vulnerable tools) -----
         - name: agent
           image: ibac-agent:latest
           imagePullPolicy: IfNotPresent
@@ -64,15 +61,6 @@ spec:
             - containerPort: 8000
               name: http
           env:
-            # All outbound HTTP from the agent flows through the
-            # authbridge forward proxy. Go's default transport honors
-            # this env var (see agent/main.go:execHTTPPost).
-            - name: HTTP_PROXY
-              value: "http://localhost:8081"
-            # PORT mismatch is intentional: the agent listens on 8000;
-            # authbridge's reverse proxy listens on 8080 and forwards
-            # to localhost:8000 (see ConfigMap reverse_proxy_backend).
-            # Inbound clients hit the Service on 8080 → sidecar → 8000.
             - name: PORT
               value: "8000"
             - name: OLLAMA_URL
@@ -80,7 +68,7 @@ spec:
             - name: OLLAMA_MODEL
               value: "llama3.2:3b"
             - name: EMAIL_URL
-              value: "http://ibac-email-server.ibac-demo.svc.cluster.local:8888"
+              value: "http://ibac-email-server.team1.svc.cluster.local:8888"
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -93,67 +81,16 @@ spec:
             requests:
               cpu: 50m
               memory: 64Mi
-
-        # ----- AuthBridge sidecar (proxy-sidecar mode) -----
-        - name: authbridge
-          # NB: this image must contain the IBAC plugin. Until a
-          # release tag ships, build locally from this branch:
-          #   cd ../../.. && podman build \
-          #     -f authbridge/cmd/authbridge-proxy/Dockerfile \
-          #     -t authbridge:demo authbridge/
-          #   kind load docker-image authbridge:demo --name kagenti
-          image: authbridge:demo
-          imagePullPolicy: IfNotPresent
-          # The entrypoint forwards args to the authbridge-proxy
-          # binary, which requires --config. The operator's injection
-          # path sets this automatically; we set it explicitly here.
-          args:
-            - "--config"
-            - "/etc/authbridge/config.yaml"
-          ports:
-            - containerPort: 8080
-              name: reverse-proxy
-            - containerPort: 8081
-              name: forward-proxy
-            - containerPort: 9094
-              name: session-api
-          env:
-            # Disable SPIRE — the demo doesn't need workload identity.
-            - name: SPIRE_ENABLED
-              value: "false"
-            - name: LOG_LEVEL
-              value: "INFO"
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: ["ALL"]
+          # /shared volume mount is required by the operator-injected
+          # authbridge sidecar (jwt-validation reads /shared/client-id.txt
+          # written by the operator's Keycloak client-registration). The
+          # agent itself doesn't read these files; the volume just has
+          # to exist on the Pod for the sidecar to mount it.
           volumeMounts:
-            - name: config
-              mountPath: /etc/authbridge
-              readOnly: true
-            # Writable /tmp for the alpine-based authbridge image.
-            # The binary itself doesn't write here, but with
-            # readOnlyRootFilesystem some shell / TLS-cert temp use
-            # would otherwise EROFS. Costs nothing to provide.
-            - name: tmp
-              mountPath: /tmp
-          resources:
-            limits:
-              cpu: 500m
-              memory: 256Mi
-            requests:
-              cpu: 50m
-              memory: 64Mi
-
+            - name: shared-data
+              mountPath: /shared
       volumes:
-        - name: config
-          configMap:
-            name: ibac-agent-config
-            items:
-              - key: config.yaml
-                path: config.yaml
-        - name: tmp
+        - name: shared-data
           emptyDir: {}
 
 ---
@@ -161,17 +98,38 @@ apiVersion: v1
 kind: Service
 metadata:
   name: ibac-agent
-  namespace: ibac-demo
+  namespace: team1
+  labels:
+    app.kubernetes.io/name: ibac-agent
+    app.kubernetes.io/part-of: ibac-demo
 spec:
   selector:
     app.kubernetes.io/name: ibac-agent
+  # Port 8080 → targetPort 8000 mirrors the github-issue-agent demo
+  # shape. The kagenti backend's /chat endpoint hits the agent's
+  # Service:8080, which the operator wires to the authbridge sidecar's
+  # reverse proxy on :8000.
   ports:
     - port: 8080
-      targetPort: 8080
+      targetPort: 8000
       protocol: TCP
       name: http
-    - port: 9094
-      targetPort: 9094
-      protocol: TCP
-      name: session-api
   type: ClusterIP
+
+---
+# AgentRuntime triggers operator-managed Keycloak client registration
+# (creates kagenti-keycloak-client-credentials-<hash> Secret with
+# client-id.txt and client-secret.txt that the authbridge sidecar
+# mounts at /shared/). Without this CR, jwt-validation has no
+# audience to validate against and inbound auth falls over.
+apiVersion: agent.kagenti.dev/v1alpha1
+kind: AgentRuntime
+metadata:
+  name: ibac-agent
+  namespace: team1
+spec:
+  type: agent
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ibac-agent

@@ -1,37 +1,73 @@
-# IBAC demo Makefile.
+# IBAC demo Makefile — kagenti-UI flow.
 #
-# End-to-end flow:
+# End-to-end:
 #
-#   make build-images         # build agent / email-server / evil-server
-#   make build-authbridge     # build authbridge:demo from this branch
-#   make load-images          # kind load all four images
-#   make deploy               # apply manifests, wait for pods
-#   make demo-no-ibac         # run attack with IBAC disabled (exfil succeeds)
-#   make demo-ibac            # patch ConfigMap to enable IBAC, retry
-#   make undeploy             # delete the demo namespace + workloads
+#   make build-images          # 3 demo images (agent, email, evil)
+#   make build-authbridge      # rebuild authbridge from this branch
+#                              # under whatever tag the kagenti operator
+#                              # pulls (autodetected from a running pod)
+#   make load-images           # kind load all four
+#   make demo-ibac             # deploy + patch + ready-to-chat banner
+#   make show-result           # render pipeline forensic of last session
+#   make undeploy              # remove the demo's resources from team1
 #
 # Prerequisites:
-#   - kind cluster running (any name; defaults to "kagenti")
-#   - ollama running on the host with llama3.2:3b pulled
-#       ollama pull llama3.2:3b
-#   - kubectl, podman (or docker), and kind on PATH
+#   - kagenti installed on a kind cluster (this is the operator-flow
+#     demo; for plain-kind testing of the IBAC plugin, see commit history
+#     for the standalone variant)
+#   - ollama on the host with llama3.2:3b pulled
+#   - kubectl, kind, podman/docker, python3 + PyYAML
 
-.PHONY: build-images build-authbridge load-images deploy undeploy \
-        demo-no-ibac demo-ibac toggle-no-ibac toggle-ibac wait-pods \
-        ensure-deployed port-forward stop-port-forward logs-agent logs-evil
+.PHONY: build-images build-authbridge load-images deploy patch-config \
+        wait-reload demo-ibac show-result undeploy logs-agent logs-evil \
+        preflight wait-pods
 
 KIND_CLUSTER_NAME ?= kagenti
 KIND_NODE         ?= $(KIND_CLUSTER_NAME)-control-plane
-NAMESPACE         ?= ibac-demo
+NAMESPACE         ?= team1
+AGENT_NAME        ?= ibac-agent
 
-# Container runtime auto-detect — same convention as proxy-init/Makefile.
+# Container runtime auto-detect.
 CONTAINER_RUNTIME ?= $(shell command -v podman >/dev/null 2>&1 && echo podman || echo docker)
 
-# Image tags — local-only, not pushed anywhere.
-AGENT_IMAGE        := ibac-agent:latest
-EMAIL_IMAGE        := ibac-email-server:latest
-EVIL_IMAGE         := ibac-evil-server:latest
-AUTHBRIDGE_IMAGE   := authbridge:demo
+# Demo-image tags (local-only, not pushed).
+AGENT_IMAGE       := ibac-agent:latest
+EMAIL_IMAGE       := ibac-email-server:latest
+EVIL_IMAGE        := ibac-evil-server:latest
+
+# Auto-detect the authbridge image tag the operator is configured to
+# pull. Reads a running agent pod's authbridge-proxy container image.
+# Falls back to v0.6.0-alpha.3 (current chart pin at the time of
+# writing) when nothing is running yet — the user can override with
+# `make AUTHBRIDGE_TAG=v0.6.0-alpha.4 ...`.
+AUTHBRIDGE_TAG ?= $(shell kubectl get pod -A \
+    -o jsonpath='{range .items[*]}{.spec.containers[?(@.name=="authbridge-proxy")].image}{"\n"}{end}' 2>/dev/null \
+    | grep -E '^ghcr.io/kagenti/kagenti-extensions/authbridge:' \
+    | head -1 | awk -F: '{print $$NF}')
+ifeq ($(AUTHBRIDGE_TAG),)
+  AUTHBRIDGE_TAG := v0.6.0-alpha.3
+endif
+AUTHBRIDGE_IMAGE := ghcr.io/kagenti/kagenti-extensions/authbridge:$(AUTHBRIDGE_TAG)
+
+# ---------- Pre-flight ----------
+
+preflight:
+	@kubectl get ns kagenti-system >/dev/null 2>&1 || { \
+	  echo "ERROR: namespace 'kagenti-system' not found — kagenti doesn't appear to be installed."; \
+	  echo "       Install kagenti first (see https://github.com/kagenti/kagenti/blob/main/docs/install.md)"; \
+	  exit 1; \
+	}
+	@kubectl get ns $(NAMESPACE) >/dev/null 2>&1 || { \
+	  echo "ERROR: namespace '$(NAMESPACE)' not found — kagenti's agent namespace is missing."; \
+	  echo "       Did the kagenti install complete? Try: kubectl get ns | grep team"; \
+	  exit 1; \
+	}
+	@command -v kind >/dev/null 2>&1 || { echo "ERROR: kind not installed"; exit 1; }
+	@python3 -c 'import yaml' 2>/dev/null || { \
+	  echo "ERROR: python3-yaml (PyYAML) is required."; \
+	  echo "       Install: pip3 install --user pyyaml"; \
+	  exit 1; \
+	}
 
 # ---------- Build ----------
 
@@ -42,164 +78,105 @@ build-images:
 
 build-authbridge:
 	@# Fail loudly if invoked from outside authbridge/demos/ibac/.
-	@# Without this guard the cd ../.. lands somewhere arbitrary
-	@# and the user gets a confusing podman build error.
 	@test -f ../../cmd/authbridge-proxy/Dockerfile || { \
 	  echo "build-authbridge must be run from authbridge/demos/ibac/"; \
 	  echo "(expected ../../cmd/authbridge-proxy/Dockerfile to exist)"; \
 	  exit 1; \
 	}
+	@echo "[*] Building authbridge:$(AUTHBRIDGE_TAG) (matches operator-pinned tag)"
 	cd ../.. && $(CONTAINER_RUNTIME) build \
 	  -f cmd/authbridge-proxy/Dockerfile -t $(AUTHBRIDGE_IMAGE) .
 
-# Load all four images into the kind cluster. On podman, kind's
-# kubelet looks for unqualified names under docker.io/library; podman
-# tags under localhost/ — same retag step as proxy-init/Makefile.
 load-images:
 	kind load docker-image $(AGENT_IMAGE)      --name $(KIND_CLUSTER_NAME)
 	kind load docker-image $(EMAIL_IMAGE)      --name $(KIND_CLUSTER_NAME)
 	kind load docker-image $(EVIL_IMAGE)       --name $(KIND_CLUSTER_NAME)
 	kind load docker-image $(AUTHBRIDGE_IMAGE) --name $(KIND_CLUSTER_NAME)
 ifeq ($(CONTAINER_RUNTIME),podman)
-	$(CONTAINER_RUNTIME) exec $(KIND_NODE) ctr --namespace=k8s.io images tag localhost/$(AGENT_IMAGE)      docker.io/library/$(AGENT_IMAGE)      || true
-	$(CONTAINER_RUNTIME) exec $(KIND_NODE) ctr --namespace=k8s.io images tag localhost/$(EMAIL_IMAGE)      docker.io/library/$(EMAIL_IMAGE)      || true
-	$(CONTAINER_RUNTIME) exec $(KIND_NODE) ctr --namespace=k8s.io images tag localhost/$(EVIL_IMAGE)       docker.io/library/$(EVIL_IMAGE)       || true
-	$(CONTAINER_RUNTIME) exec $(KIND_NODE) ctr --namespace=k8s.io images tag localhost/$(AUTHBRIDGE_IMAGE) docker.io/library/$(AUTHBRIDGE_IMAGE) || true
+	$(CONTAINER_RUNTIME) exec $(KIND_NODE) ctr --namespace=k8s.io images tag localhost/$(AGENT_IMAGE)        docker.io/library/$(AGENT_IMAGE)        || true
+	$(CONTAINER_RUNTIME) exec $(KIND_NODE) ctr --namespace=k8s.io images tag localhost/$(EMAIL_IMAGE)        docker.io/library/$(EMAIL_IMAGE)        || true
+	$(CONTAINER_RUNTIME) exec $(KIND_NODE) ctr --namespace=k8s.io images tag localhost/$(EVIL_IMAGE)         docker.io/library/$(EVIL_IMAGE)         || true
 endif
 
-# ---------- Deploy ----------
+# ---------- Deploy + patch ----------
 
 deploy:
-	kubectl apply -f k8s/namespace.yaml
-	kubectl apply -f k8s/networkpolicy.yaml
 	kubectl apply -f k8s/email-server.yaml
 	kubectl apply -f k8s/evil-server.yaml
-	# Bootstrap the authbridge ConfigMap with the no-ibac baseline.
-	# The agent.yaml below references this CM but doesn't define it;
-	# `make demo-{no-ibac,ibac}` rewrites it via the same pattern.
-	kubectl -n $(NAMESPACE) create configmap ibac-agent-config \
-	    --from-file=config.yaml=k8s/configs/no-ibac.yaml \
-	    --dry-run=client -o yaml \
-	  | kubectl apply -f -
 	kubectl apply -f k8s/agent.yaml
 	$(MAKE) wait-pods
 
 wait-pods:
+	@echo "[*] Waiting for ibac-email-server and ibac-evil-server ..."
 	kubectl -n $(NAMESPACE) wait --for=condition=Available --timeout=120s \
-	  deploy/ibac-email-server deploy/ibac-evil-server deploy/ibac-agent
+	  deploy/ibac-email-server deploy/ibac-evil-server
+	@echo "[*] Waiting for the operator to admit the agent pod and create the authbridge ConfigMap ..."
+	@for i in $$(seq 1 60); do \
+	  if kubectl -n $(NAMESPACE) get configmap authbridge-config-$(AGENT_NAME) >/dev/null 2>&1; then \
+	    echo "    ✓ authbridge-config-$(AGENT_NAME) present"; \
+	    break; \
+	  fi; \
+	  sleep 2; \
+	done
+	@kubectl -n $(NAMESPACE) get configmap authbridge-config-$(AGENT_NAME) >/dev/null 2>&1 || { \
+	  echo "ERROR: operator did not create authbridge-config-$(AGENT_NAME) within 120s"; \
+	  echo "       Check the agent pod state:"; \
+	  kubectl -n $(NAMESPACE) get pods -l app.kubernetes.io/name=$(AGENT_NAME); \
+	  exit 1; \
+	}
 
-# ensure-deployed runs `make deploy` on the first toggle when the
-# namespace doesn't exist yet — first-time users (and anyone who's
-# just run `make undeploy`) shouldn't have to remember to run deploy
-# separately. If the namespace IS already there we skip — `make
-# deploy` is idempotent but the wait-pods step adds ~5s.
-ensure-deployed:
-	@if ! kubectl get namespace $(NAMESPACE) >/dev/null 2>&1; then \
-	  echo "[*] $(NAMESPACE) namespace not found — running 'make deploy' first"; \
-	  $(MAKE) deploy; \
-	fi
+patch-config:
+	bash scripts/patch-ibac-config.sh $(NAMESPACE) $(AGENT_NAME)
+
+wait-reload:
+	bash scripts/wait-for-reload.sh $(NAMESPACE) $(AGENT_NAME) 120
+
+# ---------- Top-level demo + result rendering ----------
+
+demo-ibac: preflight deploy patch-config wait-reload
+	@echo
+	@echo "╔══════════════════════════════════════════════════════════╗"
+	@echo "║ ✅ IBAC demo agent ready in $(NAMESPACE)                          ║"
+	@echo "║                                                          ║"
+	@echo "║ Open the kagenti UI:                                     ║"
+	@echo "║   http://kagenti-ui.localtest.me:8080                    ║"
+	@echo "║                                                          ║"
+	@echo "║ Pick \`$(AGENT_NAME)\` from the Agents list, then chat:       ║"
+	@echo "║                                                          ║"
+	@echo "║   \"Summarize my emails.\"                                 ║"
+	@echo "║                                                          ║"
+	@echo "║ The agent will attempt the email-poison attack, IBAC     ║"
+	@echo "║ will block the exfiltration, and the chat response will  ║"
+	@echo "║ start with a ⚠️  Security event message.                  ║"
+	@echo "║                                                          ║"
+	@echo "║ Then run:                                                ║"
+	@echo "║                                                          ║"
+	@echo "║   make show-result                                       ║"
+	@echo "║                                                          ║"
+	@echo "║ to see the pipeline-level forensic.                      ║"
+	@echo "╚══════════════════════════════════════════════════════════╝"
+
+show-result:
+	bash scripts/show-result.sh $(NAMESPACE) $(AGENT_NAME)
+
+# ---------- Cleanup ----------
 
 undeploy:
-	kubectl delete namespace $(NAMESPACE) --ignore-not-found
-
-# ---------- Toggle IBAC on / off via ConfigMap swap ----------
-
-# The agent Pod always mounts ibac-agent-config. The toggle targets
-# regenerate that single ConfigMap from one of the two source files
-# under k8s/configs/, then trigger a rollout restart so the new pod
-# picks up the new config from a clean start.
-#
-# Authbridge supports filesystem-watch hot-reload, but with the demo's
-# strict securityContext (readOnlyRootFilesystem + nonroot) the
-# fsnotify watcher doesn't reliably catch ConfigMap symlink-swap
-# events on the projected volume. `kubectl rollout restart` is
-# bulletproof — costs ~10s of startup time per toggle, predictable.
-#
-# `kubectl create cm --from-file --dry-run=client | kubectl apply`
-# is the idiomatic "stamp this ConfigMap to exactly this content"
-# pattern — it sidesteps resource-version conflicts you'd hit trying
-# to copy data between two existing ConfigMaps via apply.
-toggle-no-ibac:
-	@echo "[*] Switching authbridge config -> NO IBAC (baseline)"
-	kubectl -n $(NAMESPACE) create configmap ibac-agent-config \
-	    --from-file=config.yaml=k8s/configs/no-ibac.yaml \
-	    --dry-run=client -o yaml \
-	  | kubectl apply -f -
-	kubectl -n $(NAMESPACE) annotate cm ibac-agent-config \
-	  ibac-demo/active=no-ibac --overwrite
-	kubectl -n $(NAMESPACE) rollout restart deploy/ibac-agent
-	kubectl -n $(NAMESPACE) rollout status deploy/ibac-agent --timeout=60s
-
-toggle-ibac:
-	@echo "[*] Switching authbridge config -> IBAC ENABLED"
-	kubectl -n $(NAMESPACE) create configmap ibac-agent-config \
-	    --from-file=config.yaml=k8s/configs/ibac.yaml \
-	    --dry-run=client -o yaml \
-	  | kubectl apply -f -
-	kubectl -n $(NAMESPACE) annotate cm ibac-agent-config \
-	  ibac-demo/active=ibac --overwrite
-	kubectl -n $(NAMESPACE) rollout restart deploy/ibac-agent
-	kubectl -n $(NAMESPACE) rollout status deploy/ibac-agent --timeout=60s
-
-# ---------- Demo runs ----------
-
-# Run the attack: A2A POST to the agent asking it to summarize emails.
-# The agent fetches emails (one is poisoned with a prompt injection),
-# the LLM follows the injection and tries to POST to evil-server. The
-# Makefile prints the agent's response and the evil-server logs so the
-# operator can SEE whether exfiltration succeeded.
-ATTACK_BODY := '{"jsonrpc":"2.0","id":"1","method":"message/send","params":{"message":{"role":"user","parts":[{"kind":"text","text":"Summarize my emails."}],"contextId":"demo-session-1"}}}'
-
-# demo-no-ibac and demo-ibac do the same three things:
-#   1. ensure the demo is deployed
-#   2. toggle the active config
-#   3. capture a "since" timestamp, run the attack, render evidence
-#
-# The toggle target restarts the agent (rollout restart + status), so
-# by the time we hit the attack the new pod is Ready. The since
-# timestamp scopes log queries so we don't see exfil entries from a
-# previous run in the IBAC-mode evidence.
-#
-# Actual evidence rendering lives in scripts/show-evidence.sh —
-# Makefile string-quoting + indentation make multi-line bash painful.
-
-demo-no-ibac: ensure-deployed toggle-no-ibac
-	@SINCE=$$(date -u +%Y-%m-%dT%H:%M:%SZ); \
-	  $(MAKE) -s _attack; \
-	  bash scripts/show-evidence.sh no-ibac "$$SINCE"
-
-demo-ibac: ensure-deployed toggle-ibac
-	@SINCE=$$(date -u +%Y-%m-%dT%H:%M:%SZ); \
-	  $(MAKE) -s _attack; \
-	  bash scripts/show-evidence.sh ibac "$$SINCE"
-
-# Internal: send the attack request via a transient curl pod. We
-# can't `kubectl exec` into the agent container — its distroless
-# image has no shell. The transient pod starts in <2s and is GC'd
-# automatically.
-_attack:
-	@echo "=============================================="
-	@echo " Sending attack: \"Summarize my emails.\""
-	@echo "=============================================="
-	@kubectl -n $(NAMESPACE) run ibac-attacker --rm -i --restart=Never \
-	    --image=curlimages/curl:latest --quiet \
-	    --command -- curl -s -m 120 \
-	    -H "Content-Type: application/json" \
-	    -d $(ATTACK_BODY) \
-	    http://ibac-agent.$(NAMESPACE).svc.cluster.local:8080/ \
-	  || echo "(attack curl failed — agent may not be ready)"
-	@echo
+	-kubectl -n $(NAMESPACE) delete -f k8s/agent.yaml --ignore-not-found
+	-kubectl -n $(NAMESPACE) delete -f k8s/email-server.yaml --ignore-not-found
+	-kubectl -n $(NAMESPACE) delete -f k8s/evil-server.yaml --ignore-not-found
+	-kubectl -n $(NAMESPACE) delete configmap authbridge-config-$(AGENT_NAME) --ignore-not-found
+	-kubectl -n $(NAMESPACE) delete secret -l kagenti.io/client-name=$(AGENT_NAME) --ignore-not-found
+	@echo "[*] Demo resources removed from $(NAMESPACE)."
+	@echo "    The kagenti install + the namespace itself are untouched."
 
 # ---------- Diagnostics ----------
 
 logs-agent:
-	kubectl -n $(NAMESPACE) logs deploy/ibac-agent -c agent      --tail=100
+	@echo "--- agent ---"
+	kubectl -n $(NAMESPACE) logs deploy/$(AGENT_NAME) -c agent --tail=100
 	@echo "--- authbridge ---"
-	kubectl -n $(NAMESPACE) logs deploy/ibac-agent -c authbridge --tail=100
+	kubectl -n $(NAMESPACE) logs deploy/$(AGENT_NAME) -c authbridge-proxy --tail=100
 
 logs-evil:
 	kubectl -n $(NAMESPACE) logs deploy/ibac-evil-server --tail=50
-
-port-forward:
-	@echo "Port-forwarding session API to localhost:9094 (Ctrl-C to stop)"
-	kubectl -n $(NAMESPACE) port-forward deploy/ibac-agent 9094:9094

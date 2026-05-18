@@ -1,0 +1,52 @@
+# IBAC plugin-pipeline patch fragment.
+#
+# This file is NOT a Kubernetes manifest. It's a YAML doc holding the
+# additions scripts/patch-ibac-config.sh merges into the operator-
+# rendered authbridge ConfigMap (`authbridge-config-ibac-agent` in
+# team1).
+#
+# The script:
+#   1. kubectl get cm authbridge-config-ibac-agent -o jsonpath
+#      '{.data.config\.yaml}' to extract the operator's full config
+#   2. parses it with python3 (PyYAML in stdlib? no — uses ruamel-style
+#      string-edit; see patch-ibac-config.sh)
+#   3. merges these additions:
+#        - prepend `a2a-parser` to pipeline.inbound.plugins
+#          (it must run BEFORE jwt-validation so the parsed message
+#           is available even if jwt-validation rejects)
+#        - append `mcp-parser` then `ibac` to pipeline.outbound.plugins
+#          (after token-exchange, since IBAC needs to see the bearer
+#           token already set so judge calls have valid auth context;
+#           after mcp-parser so MCP tool calls are enriched)
+#   4. kubectl-applies the merged config back
+
+inbound_prepend:
+  - name: a2a-parser
+    # No config — parser uses defaults. Required so
+    # pctx.Session.LastIntent() returns the user's most recent A2A
+    # message when IBAC runs on the outbound side.
+
+outbound_append:
+  - name: mcp-parser
+    # Optional enrichment: when the agent's outbound is an MCP
+    # tools/call, this populates pctx.Extensions.MCP so IBAC's action
+    # description includes tool name + args. The IBAC demo agent's
+    # http_post tool emits raw HTTP (not MCP), so this parser doesn't
+    # fire — but adding it makes the pipeline correct for any
+    # MCP-shaped agents that copy this demo's pattern.
+  - name: ibac
+    config:
+      # Judge LLM. host.docker.internal:11434 works on Docker Desktop
+      # / kind-with-extra-hostMappings + ollama on the host. For
+      # in-cluster ollama, swap to e.g.
+      # http://ollama.ollama.svc.cluster.local:11434.
+      judge_endpoint: "http://host.docker.internal:11434"
+      judge_model: "llama3.2:3b"
+      timeout_ms: 15000
+
+      # Don't judge the agent's own LLM-reasoning calls — the
+      # `agent_llm_host` hint adds host.docker.internal to the bypass
+      # list so ollama traffic skips IBAC entirely. Without this,
+      # every reasoning call would burn an extra judge round-trip.
+      judge_inference: false
+      agent_llm_host: "host.docker.internal"

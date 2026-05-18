@@ -394,6 +394,12 @@ func runAgent(query string, sessionID string) (string, error) {
 
 	askedForActions := false
 	blockedCount := 0
+	// ibacEvent caches a human-readable description of the FIRST IBAC
+	// 403 we see during the tool loop. The maxBlocked fallback path
+	// prepends this to the final response so the kagenti UI shows the
+	// security event instead of silently returning a "safe summary"
+	// that hides the fact that anything was blocked.
+	var ibacEvent string
 	const maxBlocked = 1
 	for i := 0; i < 10; i++ {
 		resp, err := callOllama(messages, true)
@@ -441,6 +447,9 @@ func runAgent(query string, sessionID string) (string, error) {
 				result = execHTTPPost(args, sessionID)
 				if strings.Contains(result, "HTTP 403") {
 					blockedCount++
+					if ibacEvent == "" {
+						ibacEvent = parseIBACReason(result)
+					}
 				}
 			case "get_emails":
 				result = execGetEmails(args)
@@ -465,12 +474,74 @@ func runAgent(query string, sessionID string) (string, error) {
 			}
 			if len(finalResp.Choices) > 0 {
 				log.Printf("[Agent] Forced final response: %s", finalResp.Choices[0].Message.Content)
-				return finalResp.Choices[0].Message.Content, nil
+				return formatSecurityResponse(ibacEvent, finalResp.Choices[0].Message.Content), nil
 			}
 			return "", fmt.Errorf("no response after forced text-only call")
 		}
 	}
 	return "", fmt.Errorf("tool-calling loop exceeded max iterations")
+}
+
+// parseIBACReason takes the proxiedClient's HTTP-post error string
+// (which always begins with "HTTP 403: " when IBAC denies) and
+// extracts a human-readable summary the chat user can act on.
+//
+// The body shape is what authbridge's listener emits when a plugin
+// returns DenyStatus(403, code, reason):
+//
+//	{"error":"ibac.blocked","message":"<judge reason>","plugin":"ibac"}
+//	{"error":"ibac.judge_uncertain","message":"<parse error>","plugin":"ibac"}
+//	{"error":"ibac.no_intent","message":"...","plugin":"ibac"}
+//
+// The error code distinguishes a real policy denial (ibac.blocked)
+// from a degraded-but-fail-closed mode (ibac.judge_uncertain,
+// ibac.no_intent) — different user-visible language for each.
+func parseIBACReason(httpResult string) string {
+	const prefix = "HTTP 403: "
+	idx := strings.Index(httpResult, prefix)
+	if idx < 0 {
+		return "IBAC blocked an outbound action (response unavailable)"
+	}
+	body := httpResult[idx+len(prefix):]
+	// The error string in execHTTPPost truncates with "..." sometimes
+	// for log readability; trim a trailing "..." before parsing.
+	body = strings.TrimRight(body, ".")
+	body = strings.TrimSpace(body)
+
+	var parsed struct {
+		Error   string `json:"error"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(body), &parsed); err != nil {
+		return "IBAC blocked an outbound action (reason unavailable)"
+	}
+
+	label := "IBAC blocked an outbound action"
+	switch parsed.Error {
+	case "ibac.judge_uncertain":
+		label = "IBAC judge couldn't decide and failed-closed"
+	case "ibac.no_intent":
+		label = "IBAC blocked: no recorded user intent"
+	case "ibac.blocked":
+		label = "IBAC blocked an outbound action"
+	}
+	if parsed.Message != "" {
+		return fmt.Sprintf("%s: %s", label, parsed.Message)
+	}
+	return label
+}
+
+// formatSecurityResponse prepends a markdown-formatted security
+// warning to the LLM's safe summary. The kagenti UI renders assistant
+// messages with react-markdown + GFM, so emoji + bold + bullets all
+// work. If event is empty (no IBAC block was observed) the original
+// summary is returned unchanged so this function is safe to call
+// unconditionally.
+func formatSecurityResponse(event, summary string) string {
+	if event == "" {
+		return summary
+	}
+	return fmt.Sprintf("⚠️ **Security event:** %s\n\n%s", event, summary)
 }
 
 // --- A2A (JSON-RPC 2.0) endpoint ---

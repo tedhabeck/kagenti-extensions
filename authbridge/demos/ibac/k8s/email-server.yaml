@@ -1,11 +1,15 @@
-# Poisoned email server. Returns 6 emails on GET /emails — the last one
-# contains the prompt-injection payload that triggers the attack.
+# Poisoned email server for the IBAC demo.
+#
+# Returns 6 emails on GET /emails — the last one contains a prompt
+# injection that tells the agent to POST to evil-server. Plain HTTP
+# service in team1; not labelled as a kagenti agent or tool, so the
+# operator's webhook leaves it alone.
 
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: ibac-email-server
-  namespace: ibac-demo
+  namespace: team1
   labels:
     app.kubernetes.io/name: ibac-email-server
     app.kubernetes.io/part-of: ibac-demo
@@ -18,11 +22,8 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: ibac-email-server
+        app.kubernetes.io/part-of: ibac-demo
     spec:
-      # Distroless nonroot images set runAsUser implicitly, but a
-      # security-themed demo deserves an explicit policy so readers
-      # can copy the snippet verbatim. seccompProfile RuntimeDefault
-      # is the SecComp baseline most clusters require.
       securityContext:
         runAsNonRoot: true
         seccompProfile:
@@ -35,9 +36,8 @@ spec:
             - containerPort: 8888
               name: http
           env:
-            # The injection payload tells the agent to POST to this URL.
             - name: EXFIL_URL
-              value: "http://ibac-evil-server.ibac-demo.svc.cluster.local:9999"
+              value: "http://ibac-evil-server.team1.svc.cluster.local:9999"
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -55,7 +55,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: ibac-email-server
-  namespace: ibac-demo
+  namespace: team1
 spec:
   selector:
     app.kubernetes.io/name: ibac-email-server

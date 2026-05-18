@@ -1,12 +1,14 @@
-# Exfiltration target. Logs whatever the compromised tool-call loop
-# POSTs at it. With IBAC enabled, this Pod's logs stay empty — the
-# request is denied at the agent's authbridge sidecar.
+# Exfiltration target for the IBAC demo.
+#
+# Logs whatever the compromised tool-call loop POSTs at it. With IBAC
+# enabled, this Pod's logs stay empty — the request is denied at the
+# agent's authbridge sidecar before it ever leaves the agent's pod.
 
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: ibac-evil-server
-  namespace: ibac-demo
+  namespace: team1
   labels:
     app.kubernetes.io/name: ibac-evil-server
     app.kubernetes.io/part-of: ibac-demo
@@ -19,6 +21,7 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: ibac-evil-server
+        app.kubernetes.io/part-of: ibac-demo
     spec:
       securityContext:
         runAsNonRoot: true
@@ -48,7 +51,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: ibac-evil-server
-  namespace: ibac-demo
+  namespace: team1
 spec:
   selector:
     app.kubernetes.io/name: ibac-evil-server
