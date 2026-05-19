@@ -145,22 +145,10 @@ spec:
     kind: Deployment
     name: ibac-agent
 
----
-# AgentCard tells the operator's AgentCardReconciler to fetch
-# `/.well-known/agent-card.json` from the agent's Service. The kagenti
-# UI reads this CR's status to render the agent's metadata page —
-# without it the UI shows "Agent card not available."
-#
-# targetRef is duck-typed; a Deployment works (the operator just
-# needs the workload to have kagenti.io/type=agent).
-apiVersion: agent.kagenti.dev/v1alpha1
-kind: AgentCard
-metadata:
-  name: ibac-agent-card
-  namespace: team1
-spec:
-  syncPeriod: 30s
-  targetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: ibac-agent
+# We intentionally do NOT define an AgentCard CR here — the operator
+# auto-creates `<deployment>-deployment-card` for any Deployment with
+# `kagenti.io/type=agent`. Defining our own collides with the
+# admission webhook ("an AgentCard already targets Deployment X").
+# The operator's CR points at the same Deployment, fetches our
+# `/.well-known/agent-card.json` endpoint, and stuffs the result
+# into the CR's status — which the kagenti UI then displays.
