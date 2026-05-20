@@ -413,6 +413,96 @@ func TestIsSkipRow(t *testing.T) {
 	}
 }
 
+// TestComputeSpanGlyphs covers the tree-glyph assignment for the PHASE
+// column. Glyphs anchor a (request, response) pair visually so an
+// operator can trace the span even when other rows interleave.
+func TestComputeSpanGlyphs(t *testing.T) {
+	cases := []struct {
+		name  string
+		pairs map[int]int
+		n     int
+		want  []spanGlyph
+	}{
+		{
+			name:  "no pairs",
+			pairs: nil,
+			n:     3,
+			want:  []spanGlyph{glyphNone, glyphNone, glyphNone},
+		},
+		{
+			name: "adjacent pair (req at 0, resp at 1)",
+			// Bidirectional, like pairInvocationRows emits.
+			pairs: map[int]int{0: 1, 1: 0},
+			n:     2,
+			want:  []spanGlyph{glyphStart, glyphEnd},
+		},
+		{
+			name:  "pair with one row in between",
+			pairs: map[int]int{0: 2, 2: 0},
+			n:     3,
+			want:  []spanGlyph{glyphStart, glyphMiddle, glyphEnd},
+		},
+		{
+			name:  "pair spanning four rows",
+			pairs: map[int]int{0: 3, 3: 0},
+			n:     4,
+			want:  []spanGlyph{glyphStart, glyphMiddle, glyphMiddle, glyphEnd},
+		},
+		{
+			name: "two non-overlapping pairs",
+			pairs: map[int]int{
+				0: 2, 2: 0,
+				3: 5, 5: 3,
+			},
+			n:    6,
+			want: []spanGlyph{glyphStart, glyphMiddle, glyphEnd, glyphStart, glyphMiddle, glyphEnd},
+		},
+		{
+			name: "nested pairs — outer (0,5), inner (2,3)",
+			// Inner pair's endpoints overwrite outer's middle. Operators
+			// see two distinct corners in the gap.
+			pairs: map[int]int{
+				0: 5, 5: 0,
+				2: 3, 3: 2,
+			},
+			n: 6,
+			want: []spanGlyph{
+				glyphStart,  // 0: outer start
+				glyphMiddle, // 1: inside outer
+				glyphStart,  // 2: inner start (overwrites outer middle)
+				glyphEnd,    // 3: inner end (overwrites outer middle)
+				glyphMiddle, // 4: still inside outer
+				glyphEnd,    // 5: outer end
+			},
+		},
+		{
+			name: "out-of-bounds endpoint gracefully ignored",
+			// Defensive: pairInvocationRows shouldn't emit pairs with
+			// indices >= n, but the helper must not panic if it ever
+			// happens (e.g. a future caller reusing the helper on a
+			// truncated row slice).
+			pairs: map[int]int{0: 10, 10: 0},
+			n:     3,
+			want:  []spanGlyph{glyphStart, glyphMiddle, glyphMiddle},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := computeSpanGlyphs(tc.pairs, tc.n)
+			if len(got) != len(tc.want) {
+				t.Fatalf("len = %d, want %d (got %v)", len(got), len(tc.want), got)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Errorf("row %d: got %q (%d), want %q (%d)",
+						i, string(rune(got[i])), got[i],
+						string(rune(tc.want[i])), tc.want[i])
+				}
+			}
+		})
+	}
+}
+
 // TestPlural matches the helper used by the events footer hint:
 // "1 skip hidden" vs "2 skips hidden".
 func TestPlural(t *testing.T) {

@@ -78,6 +78,11 @@ func (m *model) rebuildEventsTable() {
 	// └resp glyph, so the two visual cues stay consistent.
 	eventIDs := computeEventPairIDs(rowSpecs, pairs)
 
+	// Per-row tree glyph (┌ / │ / └) for the PHASE column. Lets
+	// operators trace a paired (req, resp) span visually even when
+	// other rows interleave between them.
+	spanGlyphs := computeSpanGlyphs(pairs, len(rowSpecs))
+
 	rows := make([]table.Row, 0, len(rowSpecs))
 	m.visibleRows = m.visibleRows[:0]
 	m.hiddenSkips = 0
@@ -111,17 +116,23 @@ func (m *model) rebuildEventsTable() {
 			timeCell = rs.event.At.Format("15:04:05.00")
 			dirCell = shortDirection(rs.event.Direction)
 			phaseCell = shortPhase(rs.event.Phase)
-			if rs.event.Phase == pipeline.SessionResponse {
-				if _, paired := pairs[i]; paired {
-					// └ prefix visually connects the response row to its
-					// request row in the same (direction, plugin) pair.
-					phaseCell = "└" + phaseCell
-				}
+			// Tree-glyph prefix (┌ / │ / └) when this row sits at a
+			// pair endpoint or inside a pair span. The 6-char PHASE
+			// width budget accommodates the prefix plus the longest
+			// base phase ("resp"/"deny" → 5 chars total).
+			if g := spanGlyphs[i]; g != glyphNone {
+				phaseCell = string(rune(g)) + phaseCell
 			}
 			statusC = statusCell(*rs.event)
 			durCell = durationCell(*rs.event)
 			tokC = tokensCell(*rs.event)
 			hostC = truncStr(rs.event.Host, 20)
+		} else if g := spanGlyphs[i]; g == glyphMiddle {
+			// Continuation row inside a pair span: render the vertical
+			// connector even though the rest of the event-level columns
+			// stay blank, so the operator's eye can follow the pair
+			// across multi-invocation events.
+			phaseCell = string(rune(g))
 		}
 
 		rows = append(rows, table.Row{
@@ -210,6 +221,65 @@ func (r invocationRow) pluginCell() string {
 // `s` keybinding toggles visibility.
 func isSkipRow(r invocationRow) bool {
 	return r.inv != nil && r.inv.Action == pipeline.ActionSkip
+}
+
+// spanGlyph names which corner / side of a (request, response) pair
+// span a row sits at, for tree-style rendering in the PHASE column.
+// rune (not byte) because the box-drawing characters are multi-byte
+// in UTF-8 and would overflow a byte.
+type spanGlyph rune
+
+const (
+	glyphNone   spanGlyph = 0
+	glyphStart  spanGlyph = '┌' // request row that pairs with a later response
+	glyphMiddle spanGlyph = '│' // row strictly between a paired request and its response
+	glyphEnd    spanGlyph = '└' // response row paired with an earlier request
+)
+
+// computeSpanGlyphs assigns each row a tree glyph drawn from its
+// position relative to ALL (req, resp) spans in the row list. Priority
+// when a row could carry multiple glyphs (overlapping pairs): end
+// beats start beats middle. The user only needs "this row is part of
+// some pair structure" — not which specific pair.
+//
+// pairs is the bidirectional map from pairInvocationRows: pairs[i]=j
+// AND pairs[j]=i for any matched pair (i, j). Unpaired rows are absent.
+// n is the total row count.
+func computeSpanGlyphs(pairs map[int]int, n int) []spanGlyph {
+	out := make([]spanGlyph, n)
+	if len(pairs) == 0 {
+		return out
+	}
+	// First pass: stamp middle glyphs for every row strictly inside
+	// any pair span. A row may sit inside multiple overlapping spans;
+	// stamping is idempotent because the glyph is the same.
+	for a, b := range pairs {
+		if a >= b {
+			continue // skip the resp→req mirror; iterate each pair once
+		}
+		for k := a + 1; k < b && k < n; k++ {
+			out[k] = glyphMiddle
+		}
+	}
+	// Second pass: endpoints overwrite middle so the corners always win.
+	for a, b := range pairs {
+		if a >= b {
+			continue
+		}
+		if a < n {
+			// Don't overwrite end with start; if both fire on the same
+			// row (a chain that closes one pair and opens another at
+			// the same index), end wins because closing a pair is the
+			// stronger visual anchor.
+			if out[a] != glyphEnd {
+				out[a] = glyphStart
+			}
+		}
+		if b < n {
+			out[b] = glyphEnd
+		}
+	}
+	return out
 }
 
 // flattenInvocations walks the event slice in order and, for each event,
