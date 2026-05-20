@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"log/slog"
 	"time"
@@ -129,6 +130,65 @@ type SessionEvent struct {
 	// to response recording. Zero on request-phase events. On response
 	// events it's computed as now - matching-request.At.
 	Duration time.Duration
+
+	// TLS, when non-nil, carries connection-level identity for events
+	// that arrived over TLS: negotiated version, cipher, and the peer's
+	// SPIFFE ID extracted from the URI SAN. Nil for plaintext events
+	// and for events recorded before the TLS handshake completed.
+	// Populated by the listener layer; plugins do not write to it.
+	TLS *EventTLS
+}
+
+// EventTLS describes the TLS state of a connection that produced a
+// session event. Populated by the reverse-proxy listener when mTLS is
+// enabled and the inbound connection completed a TLS handshake;
+// otherwise nil.
+type EventTLS struct {
+	// Version is the negotiated TLS version, e.g. "TLS 1.3".
+	Version string `json:"version,omitempty"`
+
+	// CipherSuite is the negotiated cipher suite name, e.g.
+	// "TLS_AES_128_GCM_SHA256".
+	CipherSuite string `json:"cipherSuite,omitempty"`
+
+	// PeerSPIFFEID is the URI SAN of the verified peer cert when it
+	// is a SPIFFE URI; otherwise empty. Empty means either the peer
+	// cert had no SPIFFE URI (workload outside SPIRE) or had multiple
+	// (non-conformant cert).
+	PeerSPIFFEID string `json:"peerSpiffeId,omitempty"`
+}
+
+// NewEventTLS builds an EventTLS from a *tls.ConnectionState (the
+// shape http.Request.TLS exposes). peerSpiffeID is the caller's
+// pre-extracted SPIFFE URI — passed in rather than re-extracted here
+// to keep this package free of an authlib/tls dependency. Returns
+// nil when state is nil so callers can pass r.TLS unconditionally.
+func NewEventTLS(state *tls.ConnectionState, peerSpiffeID string) *EventTLS {
+	if state == nil {
+		return nil
+	}
+	return &EventTLS{
+		Version:      tlsVersionString(state.Version),
+		CipherSuite:  tls.CipherSuiteName(state.CipherSuite),
+		PeerSPIFFEID: peerSpiffeID,
+	}
+}
+
+// tlsVersionString maps the uint16 TLS version to its human name. Go
+// 1.21+ exposes tls.VersionName but we render the canonical "TLS X.Y"
+// form for consistency with operator expectations.
+func tlsVersionString(v uint16) string {
+	switch v {
+	case tls.VersionTLS13:
+		return "TLS 1.3"
+	case tls.VersionTLS12:
+		return "TLS 1.2"
+	case tls.VersionTLS11:
+		return "TLS 1.1"
+	case tls.VersionTLS10:
+		return "TLS 1.0"
+	}
+	return ""
 }
 
 // MarshalJSON emits SessionEvent in a form consumable by off-process clients:
@@ -140,38 +200,40 @@ type SessionEvent struct {
 // writes to it directly; UnmarshalJSON reads into it and converts back.
 // Keeping the layout in one place guarantees round-trip symmetry.
 type sessionEventWire struct {
-	SessionID      string                     `json:"sessionId,omitempty"`
-	At             time.Time                  `json:"at"`
-	Direction      Direction                  `json:"direction"`
-	Phase          SessionPhase               `json:"phase"`
-	A2A            *A2AExtension              `json:"a2a,omitempty"`
-	MCP            *MCPExtension              `json:"mcp,omitempty"`
-	Inference      *InferenceExtension        `json:"inference,omitempty"`
-	Invocations    *Invocations               `json:"invocations,omitempty"`
-	Plugins        map[string]json.RawMessage `json:"plugins,omitempty"`
-	Identity       *EventIdentity             `json:"identity,omitempty"`
-	StatusCode     int                        `json:"statusCode,omitempty"`
-	Error          *EventError                `json:"error,omitempty"`
-	Host       string `json:"host,omitempty"`
-	DurationMs int64  `json:"durationMs,omitempty"`
+	SessionID   string                     `json:"sessionId,omitempty"`
+	At          time.Time                  `json:"at"`
+	Direction   Direction                  `json:"direction"`
+	Phase       SessionPhase               `json:"phase"`
+	A2A         *A2AExtension              `json:"a2a,omitempty"`
+	MCP         *MCPExtension              `json:"mcp,omitempty"`
+	Inference   *InferenceExtension        `json:"inference,omitempty"`
+	Invocations *Invocations               `json:"invocations,omitempty"`
+	Plugins     map[string]json.RawMessage `json:"plugins,omitempty"`
+	Identity    *EventIdentity             `json:"identity,omitempty"`
+	StatusCode  int                        `json:"statusCode,omitempty"`
+	Error       *EventError                `json:"error,omitempty"`
+	Host        string                     `json:"host,omitempty"`
+	DurationMs  int64                      `json:"durationMs,omitempty"`
+	TLS         *EventTLS                  `json:"tls,omitempty"`
 }
 
 func (e SessionEvent) MarshalJSON() ([]byte, error) {
 	return json.Marshal(sessionEventWire{
-		SessionID:      e.SessionID,
-		At:             e.At,
-		Direction:      e.Direction,
-		Phase:          e.Phase,
-		A2A:            e.A2A,
-		MCP:            e.MCP,
-		Inference:      e.Inference,
-		Invocations:    e.Invocations,
-		Plugins:        e.Plugins,
-		Identity:       e.Identity,
-		StatusCode:     e.StatusCode,
-		Error:          e.Error,
-		Host:       e.Host,
-		DurationMs: e.Duration.Milliseconds(),
+		SessionID:   e.SessionID,
+		At:          e.At,
+		Direction:   e.Direction,
+		Phase:       e.Phase,
+		A2A:         e.A2A,
+		MCP:         e.MCP,
+		Inference:   e.Inference,
+		Invocations: e.Invocations,
+		Plugins:     e.Plugins,
+		Identity:    e.Identity,
+		StatusCode:  e.StatusCode,
+		Error:       e.Error,
+		Host:        e.Host,
+		DurationMs:  e.Duration.Milliseconds(),
+		TLS:         e.TLS,
 	})
 }
 
@@ -184,20 +246,21 @@ func (e *SessionEvent) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*e = SessionEvent{
-		SessionID:      w.SessionID,
-		At:             w.At,
-		Direction:      w.Direction,
-		Phase:          w.Phase,
-		A2A:            w.A2A,
-		MCP:            w.MCP,
-		Inference:      w.Inference,
-		Invocations:    w.Invocations,
-		Plugins:        w.Plugins,
-		Identity:       w.Identity,
-		StatusCode:     w.StatusCode,
-		Error:          w.Error,
-		Host:     w.Host,
-		Duration: time.Duration(w.DurationMs) * time.Millisecond,
+		SessionID:   w.SessionID,
+		At:          w.At,
+		Direction:   w.Direction,
+		Phase:       w.Phase,
+		A2A:         w.A2A,
+		MCP:         w.MCP,
+		Inference:   w.Inference,
+		Invocations: w.Invocations,
+		Plugins:     w.Plugins,
+		Identity:    w.Identity,
+		StatusCode:  w.StatusCode,
+		Error:       w.Error,
+		Host:        w.Host,
+		Duration:    time.Duration(w.DurationMs) * time.Millisecond,
+		TLS:         w.TLS,
 	}
 	return nil
 }

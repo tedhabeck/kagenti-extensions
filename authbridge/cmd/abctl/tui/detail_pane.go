@@ -2,6 +2,8 @@ package tui
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 
 	"github.com/charmbracelet/x/ansi"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
@@ -15,6 +17,10 @@ import (
 // events show only request-side fields and response events show only
 // response-side fields (TUI readability only — wire format is unchanged,
 // and yank still writes the full JSON).
+//
+// When the event arrived over TLS (SessionEvent.TLS non-nil), a small
+// header block is prepended to the JSON so operators can see the
+// connection-level identity at a glance. Absent for plaintext events.
 func (m *model) showDetail(e *pipeline.SessionEvent) {
 	m.detailEvent = e
 	data, err := json.Marshal(e)
@@ -29,8 +35,45 @@ func (m *model) showDetail(e *pipeline.SessionEvent) {
 		// content keeps its highlighting.
 		content = ansi.Wrap(content, w, " -")
 	}
+	if header := tlsHeader(e.TLS); header != "" {
+		content = header + "\n\n" + content
+	}
 	m.detailVp.SetContent(content)
 	m.detailVp.GotoTop()
+}
+
+// tlsHeader builds a one-block summary of the TLS connection state.
+// Returns the empty string when tls is nil (plaintext events) so the
+// caller can prepend unconditionally.
+//
+// The block stays on three lines so it fits in the detail pane
+// without pushing the JSON off-screen on small terminals:
+//
+//	TLS:
+//	  version: TLS 1.3 · cipher: TLS_AES_128_GCM_SHA256
+//	  peer:    spiffe://kagenti.local/ns/team1/sa/caller-agent
+//
+// Empty fields are skipped so the block stays terse on partial data.
+func tlsHeader(tls *pipeline.EventTLS) string {
+	if tls == nil {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("TLS:")
+	if tls.Version != "" || tls.CipherSuite != "" {
+		parts := []string{}
+		if tls.Version != "" {
+			parts = append(parts, fmt.Sprintf("version: %s", tls.Version))
+		}
+		if tls.CipherSuite != "" {
+			parts = append(parts, fmt.Sprintf("cipher: %s", tls.CipherSuite))
+		}
+		b.WriteString("\n  " + strings.Join(parts, " · "))
+	}
+	if tls.PeerSPIFFEID != "" {
+		b.WriteString(fmt.Sprintf("\n  peer:    %s", tls.PeerSPIFFEID))
+	}
+	return b.String()
 }
 
 // filterForDetail rewrites the TUI-side view of a SessionEvent so the

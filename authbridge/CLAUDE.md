@@ -245,8 +245,50 @@ Sidecars communicate through files on shared volumes:
 | Path | Writer | Reader | Content |
 |------|--------|--------|---------|
 | `/opt/jwt_svid.token` | spiffe-helper | authbridge (token-exchange) | JWT SVID from SPIRE |
+| `/opt/svid.pem` | spiffe-helper | authbridge (mTLS) | X.509 SVID leaf cert (PEM) |
+| `/opt/svid_key.pem` | spiffe-helper | authbridge (mTLS) | X.509 SVID private key (PEM) |
+| `/opt/svid_bundle.pem` | spiffe-helper | authbridge (mTLS) | SPIRE trust bundle (PEM, may concatenate multiple CAs) |
 | `/shared/client-id.txt` | operator (Secret mount) | authbridge | SPIFFE ID or workload name |
 | `/shared/client-secret.txt` | operator (Secret mount) | authbridge | Keycloak client secret |
+
+The X.509 SVID files are written by spiffe-helper unconditionally on
+every authbridge pod with `SPIRE_ENABLED=true` (they're already present
+on disk in existing deployments). authbridge consumes them only when
+`mtls:` is configured at the top level of `authbridge-runtime`; absent
+that block, today's plaintext behavior is preserved.
+
+## Top-level `mtls:` configuration
+
+When the runtime config carries an `mtls:` block, authbridge enables
+transport-level mTLS on the proxy-sidecar listeners (forward + reverse
+proxy). envoy-sidecar mode is unaffected — Envoy handles its own TLS
+via SDS independently.
+
+```yaml
+# authbridge-runtime ConfigMap (top-level)
+mtls:
+  mode: strict          # permissive | strict (omit block entirely for off)
+  # cert_file / key_file / bundle_file optional —
+  # default to /opt/svid.pem, /opt/svid_key.pem, /opt/svid_bundle.pem
+```
+
+| Mode | Inbound (reverse proxy `:8080`) | Outbound (forward proxy) |
+|---|---|---|
+| (no `mtls` block) | Plaintext only. | Plaintext only. |
+| `permissive` (default when block present) | Byte-peek listener: TLS handshakes verified against the SPIRE trust bundle; plaintext callers served on the same port. | Try TLS first; on handshake failure fall back to plain TCP (one-line WARN log). |
+| `strict` | TLS only — non-TLS callers get the connection closed. | TLS or fail: handshake failure is a hard error, no fallback. |
+
+In both modes, a successful TLS handshake that fails certificate
+verification is always a hard error.
+
+**Trust model:** any peer with a valid cert from the SPIRE trust bundle
+can talk to this authbridge. Per-caller policy / SPIFFE allowlists are
+out of scope; the trust bundle IS the policy. Plugins that want
+per-caller decisions read `pctx.PeerCert` and check the URI SAN.
+
+**Hot-reload boundary:** mTLS config (`mtls.mode`, cert paths) requires a
+pod restart to apply, matching the existing rule for `listener.*`
+addresses. Plugin-pipeline config keeps its own hot-reload behavior.
 
 ## Build and Deploy
 

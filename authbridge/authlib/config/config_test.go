@@ -513,3 +513,136 @@ func TestPluginEntry_OnError_Omitted(t *testing.T) {
 		t.Errorf("Resolved() of empty = %q, want enforce", got.Resolved())
 	}
 }
+
+// --- mTLS config ---
+
+// MTLSConfig.Validate accepts the two named modes plus empty (which
+// resolves to permissive). Anything else is rejected so a typo in
+// the YAML doesn't silently fall through to "no TLS."
+func TestMTLSConfig_Validate(t *testing.T) {
+	cases := []struct {
+		name    string
+		cfg     *MTLSConfig
+		wantErr bool
+	}{
+		{"nil — fine, no mTLS", nil, false},
+		{"empty mode — permissive default", &MTLSConfig{}, false},
+		{"explicit permissive", &MTLSConfig{Mode: MTLSModePermissive}, false},
+		{"explicit strict", &MTLSConfig{Mode: MTLSModeStrict}, false},
+		{"unknown mode", &MTLSConfig{Mode: "loose"}, true},
+		{"typo PERMISSIVE", &MTLSConfig{Mode: "PERMISSIVE"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.cfg.Validate()
+			if (err != nil) != tc.wantErr {
+				t.Errorf("Validate = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// ResolvedMode applies the empty-string default. Locks the
+// MTLSModePermissive default so a future code change can't silently
+// flip it.
+func TestMTLSConfig_ResolvedMode(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  *MTLSConfig
+		want MTLSMode
+	}{
+		{"nil → permissive", nil, MTLSModePermissive},
+		{"empty mode → permissive", &MTLSConfig{}, MTLSModePermissive},
+		{"explicit strict stays strict", &MTLSConfig{Mode: MTLSModeStrict}, MTLSModeStrict},
+		{"explicit permissive stays permissive", &MTLSConfig{Mode: MTLSModePermissive}, MTLSModePermissive},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.cfg.ResolvedMode(); got != tc.want {
+				t.Errorf("ResolvedMode = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// Load applies the spiffe-helper default cert/key/bundle paths when
+// the operator omits them — the common case is `mtls: { mode:
+// permissive }` and nothing more.
+func TestLoad_MTLS_DefaultPaths(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := `mode: proxy-sidecar
+listener:
+  reverse_proxy_addr: ":8080"
+  forward_proxy_addr: ":8081"
+  reverse_proxy_backend: "http://localhost:8001"
+mtls:
+  mode: strict
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MTLS == nil {
+		t.Fatal("MTLS unexpectedly nil")
+	}
+	if cfg.MTLS.Mode != MTLSModeStrict {
+		t.Errorf("Mode = %q, want strict", cfg.MTLS.Mode)
+	}
+	if cfg.MTLS.CertFile != "/opt/svid.pem" {
+		t.Errorf("CertFile = %q, want default", cfg.MTLS.CertFile)
+	}
+	if cfg.MTLS.KeyFile != "/opt/svid_key.pem" {
+		t.Errorf("KeyFile = %q, want default", cfg.MTLS.KeyFile)
+	}
+	if cfg.MTLS.BundleFile != "/opt/svid_bundle.pem" {
+		t.Errorf("BundleFile = %q, want default", cfg.MTLS.BundleFile)
+	}
+}
+
+// Load surfaces an unknown mode as a configuration error rather than
+// silently ignoring it (which would leave operators thinking they
+// have mTLS when they don't).
+func TestLoad_MTLS_UnknownModeRejected(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := `mode: proxy-sidecar
+listener:
+  reverse_proxy_addr: ":8080"
+  forward_proxy_addr: ":8081"
+  reverse_proxy_backend: "http://localhost:8001"
+mtls:
+  mode: loose
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("Load: expected error on unknown mtls.mode")
+	}
+}
+
+// Absent mtls block leaves cfg.MTLS nil — today's behavior, no TLS.
+func TestLoad_MTLS_AbsentBlock(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := `mode: proxy-sidecar
+listener:
+  reverse_proxy_addr: ":8080"
+  forward_proxy_addr: ":8081"
+  reverse_proxy_backend: "http://localhost:8001"
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MTLS != nil {
+		t.Errorf("MTLS = %+v, want nil (absent block)", cfg.MTLS)
+	}
+}

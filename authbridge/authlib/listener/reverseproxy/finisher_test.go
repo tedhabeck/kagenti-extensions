@@ -60,7 +60,7 @@ func TestReverseProxy_Finisher_Allow(t *testing.T) {
 	defer backend.Close()
 
 	f := &finisherStub{name: "f-allow"}
-	srv, err := NewServer(pipelineWith(t, f), nil, backend.URL)
+	srv, err := NewServer(pipelineWith(t, f), nil, backend.URL, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestReverseProxy_Finisher_Deny(t *testing.T) {
 	}
 	after := &finisherStub{name: "after-deny"}
 
-	srv, err := NewServer(pipelineWith(t, before, denier, after), nil, backend.URL)
+	srv, err := NewServer(pipelineWith(t, before, denier, after), nil, backend.URL, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

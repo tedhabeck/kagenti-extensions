@@ -2,6 +2,8 @@ package pipeline
 
 import (
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"log/slog"
@@ -108,6 +110,19 @@ type Context struct {
 	Identity Identity     // nil before an auth plugin runs
 	Session  *SessionView // nil unless session tracking is enabled
 
+	// TLS is the connection state of the inbound TLS handshake when
+	// the request arrived over TLS, nil otherwise. Populated by the
+	// reverse-proxy listener; nil for plaintext callers (UI, curl,
+	// healthchecks), outbound contexts, and any path that doesn't go
+	// through the proxy-sidecar reverse-proxy (envoy-sidecar mode
+	// terminates TLS in Envoy and never populates this field).
+	//
+	// Plugins that want per-caller policy use the convenience method
+	// PeerCertificate() to get the leaf cert and authlib/tls.PeerSPIFFEID
+	// to extract the URI SAN. Listeners use it to populate
+	// SessionEvent.TLS for the observability surface.
+	TLS *tls.ConnectionState
+
 	// Response-phase fields (populated by listener before RunResponse).
 	// ResponseBody may be nil even during response phase if no plugin declared BodyAccess.
 	StatusCode      int
@@ -182,6 +197,17 @@ type Context struct {
 	// call hits a WARN log and early-returns rather than
 	// double-releasing every Finisher's state.
 	finished bool
+}
+
+// PeerCertificate returns the verified peer leaf certificate from
+// the TLS connection state, or nil when the connection was plaintext
+// or carried no peer cert. Convenience accessor so plugins don't
+// have to bounds-check the slice.
+func (c *Context) PeerCertificate() *x509.Certificate {
+	if c == nil || c.TLS == nil || len(c.TLS.PeerCertificates) == 0 {
+		return nil
+	}
+	return c.TLS.PeerCertificates[0]
 }
 
 // SetCurrentPlugin is called by Pipeline.Run / RunResponse immediately

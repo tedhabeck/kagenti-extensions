@@ -632,6 +632,37 @@ The pipeline **does not own**:
 | JWT issuance, client registration, Keycloak admin calls | Outside the pipeline (agent sidecars / kagenti-operator) | Async concerns happening before/after any request flow |
 | Session store writes (`Store.Append`) | Listener, called after each phase | Plugins see only the read-only `SessionView` |
 | SSE streaming of events to abctl | `authlib/sessionapi` | Observability API, not a plugin concern |
+| **mTLS handshake + peer-cert verification** | **`authlib/listener/...` (proxy-sidecar) using `authlib/tls` + `authlib/spiffe`** | **Transport-level concern; happens before any plugin sees a decrypted HTTP message** |
+
+### 8a. mTLS layer
+
+When `mtls:` is configured at the top level, the proxy-sidecar
+listeners (reverse + forward proxy) run TLS termination /
+origination using a SPIRE X.509 SVID. The plugin pipeline is
+unaware of TLS — by the time `OnRequest` fires, bytes have already
+been decrypted.
+
+Two small additive surfaces let plugins opt into connection-level
+identity:
+
+- `pctx.TLS *tls.ConnectionState` — the inbound handshake state when
+  the connection went through TLS. Convenience accessor
+  `pctx.PeerCertificate()` returns the verified leaf cert. Plugins
+  that want per-caller policy use `authlib/tls.PeerSPIFFEID` to extract
+  the URI SAN. Most plugins ignore it.
+- `SessionEvent.TLS *EventTLS` — version, cipher, peer SPIFFE ID per
+  event. Listeners populate it; abctl renders it in the events
+  detail pane. Pure observability.
+
+The mTLS code lives in `authlib/tls` + `authlib/spiffe` (framework-
+shared) and `authlib/listener/internal/tlssniff` (listener-internal
+byte-peek dispatcher). Only `cmd/authbridge-proxy` and
+`cmd/authbridge-lite` wire it up; `cmd/authbridge-envoy` stays on
+plaintext-localhost because Envoy handles wire encryption via SDS
+independently.
+
+mTLS config changes require a pod restart (matches the listener-
+config reload boundary in §9 below).
 
 The pipeline **does own**:
 - The `Plugin` interface contract.

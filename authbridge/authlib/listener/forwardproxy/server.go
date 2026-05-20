@@ -5,9 +5,12 @@ package forwardproxy
 
 import (
 	"bytes"
+	"context"
+	cryptotls "crypto/tls"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 
@@ -15,6 +18,8 @@ import (
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/listener/httpx"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/session"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/spiffe"
+	authtls "github.com/kagenti/kagenti-extensions/authbridge/authlib/tls"
 )
 
 const maxBodySize = 1 << 20 // 1MB — matches Envoy's default per_stream_buffer_limit_bytes
@@ -30,18 +35,127 @@ type Server struct {
 	Client           *http.Client
 }
 
+// MTLSOptions configures outbound mTLS. When non-nil, the forward
+// proxy's HTTP client uses a custom DialContext that:
+//
+//  1. opens a plain TCP connection to the destination
+//  2. attempts a TLS handshake using the local SVID
+//  3. on handshake success → returns the *tls.Conn
+//  4. on handshake failure:
+//     - Strict=false: closes, redials plain TCP, returns the plain conn
+//     (with a one-line WARN log naming the destination)
+//     - Strict=true: closes and returns the handshake error
+//  5. successful handshake with verification failure is always a hard
+//     error in both modes (destination misconfigured its identity)
+type MTLSOptions struct {
+	Source  spiffe.X509Source
+	Strict  bool
+	Metrics *authtls.Metrics
+}
+
 // NewServer creates a forward proxy server with a default HTTP client.
-func NewServer(outbound *pipeline.Holder, sessions *session.Store) *Server {
+// When mtls is non-nil, every outbound dial first tries TLS using the
+// local SVID; mode-aware fallback is described in MTLSOptions.
+func NewServer(outbound *pipeline.Holder, sessions *session.Store, mtls *MTLSOptions) (*Server, error) {
+	transport := &http.Transport{
+		// Sane Go defaults for everything except DialContext, which we
+		// customize when mTLS is on.
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+
+	if mtls != nil {
+		if mtls.Source == nil {
+			return nil, fmt.Errorf("forwardproxy: MTLSOptions.Source is required when mtls is non-nil")
+		}
+		tlsCfg, err := authtls.ClientConfig(mtls.Source)
+		if err != nil {
+			return nil, fmt.Errorf("forwardproxy: build client tls config: %w", err)
+		}
+		transport.DialContext = mtlsDialer(tlsCfg, mtls.Strict, mtls.Metrics).DialContext
+	}
+
 	return &Server{
 		OutboundPipeline: outbound,
 		Sessions:         sessions,
 		Client: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout:   30 * time.Second,
+			Transport: transport,
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
 		},
+	}, nil
+}
+
+// mtlsDialer returns a dialer-shaped object whose DialContext does
+// the try-TLS-fall-back-to-plain dance. We construct it once per
+// Server so the *tls.Config / metrics references are stable across
+// connections.
+type mtlsDialFunc struct {
+	plain   *net.Dialer
+	tlsCfg  *cryptotls.Config
+	strict  bool
+	metrics *authtls.Metrics
+}
+
+func mtlsDialer(cfg *cryptotls.Config, strict bool, metrics *authtls.Metrics) *mtlsDialFunc {
+	return &mtlsDialFunc{
+		plain:   &net.Dialer{Timeout: 10 * time.Second},
+		tlsCfg:  cfg,
+		strict:  strict,
+		metrics: metrics,
 	}
+}
+
+func (d *mtlsDialFunc) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	plain, err := d.plain.DialContext(ctx, network, addr)
+	if err != nil {
+		// TCP failure — never retry as TLS, and never count as a TLS
+		// fallback. Connection refused / DNS failure is a different
+		// kind of bug from "destination doesn't speak TLS."
+		return nil, err
+	}
+
+	// Per-handshake config: clone so we can set ServerName for SNI
+	// without polluting the shared template.
+	hsCfg := d.tlsCfg.Clone()
+	host, _, splitErr := net.SplitHostPort(addr)
+	if splitErr == nil && host != "" {
+		hsCfg.ServerName = host
+	}
+
+	tlsConn := cryptotls.Client(plain, hsCfg)
+	hsCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := tlsConn.HandshakeContext(hsCtx); err != nil {
+		_ = tlsConn.Close()
+
+		// Strict mode: handshake failure is terminal. Don't fall back.
+		if d.strict {
+			if d.metrics != nil {
+				d.metrics.OutboundFailed.Add(1)
+			}
+			return nil, fmt.Errorf("forwardproxy mtls strict: handshake to %s failed: %w", addr, err)
+		}
+
+		// Permissive mode: redial plain TCP and return that. Surface
+		// the destination so operators can spot persistent fallbacks
+		// in their logs and either install authbridge on the target
+		// or accept the cost.
+		if d.metrics != nil {
+			d.metrics.OutboundFellBack.Add(1)
+		}
+		slog.Warn("mtls fallback to plaintext", "addr", addr, "reason", err.Error())
+		return d.plain.DialContext(ctx, network, addr)
+	}
+
+	if d.metrics != nil {
+		d.metrics.OutboundTLSSucceeded.Add(1)
+	}
+	return tlsConn, nil
 }
 
 // Handler returns the HTTP handler for the forward proxy.
@@ -287,5 +401,3 @@ func (s *Server) recordOutboundReject(pctx *pipeline.Context, action pipeline.Ac
 	}
 	s.Sessions.Append(sid, ev)
 }
-
-
