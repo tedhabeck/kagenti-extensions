@@ -30,6 +30,8 @@ import (
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/reloader"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/session"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/sessionapi"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/spiffe"
+	authtls "github.com/kagenti/kagenti-extensions/authbridge/authlib/tls"
 
 	// Only HTTP listeners are compiled in: no extproc/extauthz
 	// (no gRPC, no envoy types).
@@ -164,14 +166,48 @@ func main() {
 
 	var httpServers []*http.Server
 
+	// mTLS: see authbridge-proxy/main.go for the architectural notes —
+	// this is the size-optimized variant of the same wiring.
+	var (
+		rpMTLS      *reverseproxy.MTLSOptions
+		fpMTLS      *forwardproxy.MTLSOptions
+		mtlsMetrics *authtls.Metrics
+	)
+	if cfg.MTLS != nil {
+		strict := cfg.MTLS.ResolvedMode() == config.MTLSModeStrict
+		src := spiffe.NewFileX509Source(cfg.MTLS.CertFile, cfg.MTLS.KeyFile, cfg.MTLS.BundleFile)
+		mtlsMetrics = authtls.NewMetrics()
+		rpMTLS = &reverseproxy.MTLSOptions{Source: src, Strict: strict, Metrics: mtlsMetrics}
+		fpMTLS = &forwardproxy.MTLSOptions{Source: src, Strict: strict, Metrics: mtlsMetrics}
+		slog.Info("mTLS enabled", "mode", cfg.MTLS.ResolvedMode(),
+			"cert", cfg.MTLS.CertFile, "key", cfg.MTLS.KeyFile, "bundle", cfg.MTLS.BundleFile)
+		// Wait for spiffe-helper to write the SVID files before
+		// constructing the TLS-aware listeners — see authbridge-proxy
+		// main.go for the full rationale (unbounded wait, kubelet
+		// readiness surfaces the not-ready state).
+		for _, p := range []string{cfg.MTLS.CertFile, cfg.MTLS.KeyFile, cfg.MTLS.BundleFile} {
+			if _, err := config.WaitForCredentialFile(context.Background(), p); err != nil {
+				log.Fatalf("waiting for mtls cert file %s: %v", p, err)
+			}
+		}
+		slog.Info("mtls cert files ready")
+	} else {
+		slog.Info("mTLS disabled (no mtls block in config)")
+	}
+
 	// Proxy-sidecar: reverse proxy on the inbound path + forward proxy
 	// on the outbound path.
-	rpSrv, err := reverseproxy.NewServer(inboundH, sessions, cfg.Listener.ReverseProxyBackend)
+	rpSrv, err := reverseproxy.NewServer(inboundH, sessions, cfg.Listener.ReverseProxyBackend, rpMTLS)
 	if err != nil {
 		log.Fatalf("creating reverse proxy: %v", err)
 	}
-	httpServers = append(httpServers, startHTTPServer("reverse-proxy", rpSrv.Handler(), cfg.Listener.ReverseProxyAddr))
-	httpServers = append(httpServers, startHTTPServer("forward-proxy", forwardproxy.NewServer(outboundH, sessions).Handler(), cfg.Listener.ForwardProxyAddr))
+	fpSrv, err := forwardproxy.NewServer(outboundH, sessions, fpMTLS)
+	if err != nil {
+		log.Fatalf("creating forward proxy: %v", err)
+	}
+	httpServers = append(httpServers, startReverseProxyServer("reverse-proxy", rpSrv, cfg.Listener.ReverseProxyAddr))
+	httpServers = append(httpServers, startHTTPServer("forward-proxy", fpSrv.Handler(), cfg.Listener.ForwardProxyAddr))
+	_ = mtlsMetrics // TODO Phase 2: surface metrics through /stats
 
 	statsProvider := func() *auth.Stats {
 		sources := plugins.CollectStats(inboundH.Load())
@@ -253,6 +289,29 @@ func startHTTPServer(name string, handler http.Handler, addr string) *http.Serve
 	go func() {
 		slog.Info("HTTP server listening", "name", name, "addr", addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("%s serve: %v", name, err)
+		}
+	}()
+	return srv
+}
+
+// startReverseProxyServer mirrors startHTTPServer but routes through
+// reverseproxy.Server.Listen() so the byte-peek TLS-sniffing listener
+// is wired in when mTLS is enabled. Same shape as the equivalent
+// helper in cmd/authbridge-proxy.
+func startReverseProxyServer(name string, rp *reverseproxy.Server, addr string) *http.Server {
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           rp.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	listener, err := rp.Listen(addr)
+	if err != nil {
+		log.Fatalf("%s listen: %v", name, err)
+	}
+	go func() {
+		slog.Info("HTTP server listening", "name", name, "addr", addr, "mtls", rp.MTLSEnabled())
+		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("%s serve: %v", name, err)
 		}
 	}()

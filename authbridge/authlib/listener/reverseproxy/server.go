@@ -6,17 +6,22 @@ package reverseproxy
 import (
 	"bytes"
 	"context"
+	cryptotls "crypto/tls"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"time"
 
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/listener/httpx"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/listener/internal/tlssniff"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/session"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/spiffe"
+	authtls "github.com/kagenti/kagenti-extensions/authbridge/authlib/tls"
 )
 
 const maxBodySize = 1 << 20 // 1MB — matches Envoy's default per_stream_buffer_limit_bytes
@@ -48,10 +53,38 @@ type Server struct {
 	Sessions        *session.Store // nil when session tracking is disabled
 	proxy           *httputil.ReverseProxy
 	backend         string
+
+	// mtlsCfg is the *tls.Config wrapping the local SVID for inbound
+	// mTLS, or nil when mTLS is disabled. mtlsMode is consulted by
+	// the byte-peek listener (Listen) to decide whether non-TLS
+	// connections are passed through (permissive) or closed (strict).
+	mtlsCfg     *cryptotls.Config
+	mtlsMode    tlssniff.Mode
+	mtlsMetrics *authtls.Metrics
+}
+
+// MTLSOptions configures inbound mTLS. Pass nil (or a zero-value
+// MTLSOptions with Source nil) to construct a server with TLS off.
+type MTLSOptions struct {
+	// Source supplies the local SVID + trust bundle. Required when
+	// MTLSOptions is non-nil; the constructor errors otherwise.
+	Source spiffe.X509Source
+
+	// Strict: when true, the listener rejects non-TLS callers. When
+	// false (default), it accepts both TLS and plaintext on the same
+	// port via byte-peek detection.
+	Strict bool
+
+	// Metrics, when non-nil, receives counter increments on TLS
+	// accept / plaintext-accept / plaintext-reject paths. The caller
+	// owns the *Metrics and exposes its Snapshot via /stats.
+	Metrics *authtls.Metrics
 }
 
 // NewServer creates a reverse proxy that forwards to the given backend URL.
-func NewServer(inbound *pipeline.Holder, sessions *session.Store, backendURL string) (*Server, error) {
+// When mtls is non-nil, the listener returned by Listen wraps the inbound
+// connection in TLS sniffing using the provided X.509 source.
+func NewServer(inbound *pipeline.Holder, sessions *session.Store, backendURL string, mtls *MTLSOptions) (*Server, error) {
 	target, err := url.Parse(backendURL)
 	if err != nil {
 		return nil, err
@@ -63,9 +96,64 @@ func NewServer(inbound *pipeline.Holder, sessions *session.Store, backendURL str
 		proxy:           proxy,
 		backend:         backendURL,
 	}
+	if mtls != nil {
+		if mtls.Source == nil {
+			return nil, fmt.Errorf("reverseproxy: MTLSOptions.Source is required when mtls is non-nil")
+		}
+		tlsCfg, err := authtls.ServerConfig(mtls.Source)
+		if err != nil {
+			return nil, fmt.Errorf("reverseproxy: build server tls config: %w", err)
+		}
+		s.mtlsCfg = tlsCfg
+		s.mtlsMode = tlssniff.ModePermissive
+		if mtls.Strict {
+			s.mtlsMode = tlssniff.ModeStrict
+		}
+		s.mtlsMetrics = mtls.Metrics
+	}
 	proxy.ModifyResponse = s.modifyResponse
 	proxy.ErrorHandler = s.errorHandler
 	return s, nil
+}
+
+// Listen returns a net.Listener bound to addr. When mTLS is configured
+// the listener is a tlssniff.Listener that dispatches TLS handshakes
+// through the local SVID and pass-throughs plain HTTP per the
+// configured mode (permissive / strict). When mTLS is disabled the
+// returned listener is a plain net.Listen("tcp", addr).
+//
+// Callers pass the result to http.Server.Serve.
+func (s *Server) Listen(addr string) (net.Listener, error) {
+	inner, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	if s.mtlsCfg == nil {
+		return inner, nil
+	}
+	sniff := tlssniff.New(inner, s.mtlsCfg, s.mtlsMode)
+	if s.mtlsMetrics != nil {
+		sniff.SetOnPlainRejected(func(_ net.Conn) {
+			s.mtlsMetrics.InboundPlainRejected.Add(1)
+		})
+	}
+	return sniff, nil
+}
+
+// MTLSEnabled reports whether the listener is wrapping connections
+// in TLS-sniffing. Used by the bin's startup-log path to surface a
+// clear message about the listener mode.
+func (s *Server) MTLSEnabled() bool { return s.mtlsCfg != nil }
+
+// eventTLS builds a *pipeline.EventTLS from the pctx's connection
+// state, extracting the peer SPIFFE ID via authlib/tls. Returns nil
+// for plaintext or absent TLS state — sites that pass the result
+// through to a SessionEvent get the right thing for any caller.
+func eventTLS(pctx *pipeline.Context) *pipeline.EventTLS {
+	if pctx == nil || pctx.TLS == nil {
+		return nil
+	}
+	return pipeline.NewEventTLS(pctx.TLS, authtls.PeerSPIFFEID(pctx.PeerCertificate()))
 }
 
 // Handler returns the HTTP handler for the reverse proxy.
@@ -81,6 +169,19 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		Path:      r.URL.Path,
 		Headers:   r.Header.Clone(),
 		StartedAt: time.Now(),
+	}
+
+	// Surface connection-level identity to plugins that opt in. r.TLS is
+	// non-nil only when the connection went through TLS — for plain HTTP
+	// callers (UI, healthchecks), pctx.TLS stays nil and any plugin
+	// reading it sees the absence cleanly.
+	if r.TLS != nil {
+		pctx.TLS = r.TLS
+		if s.mtlsMetrics != nil && len(r.TLS.PeerCertificates) > 0 {
+			s.mtlsMetrics.InboundTLSAccepted.Add(1)
+		}
+	} else if s.mtlsMetrics != nil {
+		s.mtlsMetrics.InboundPlainAccepted.Add(1)
 	}
 
 	// Finisher dispatch runs after every exit path from this handler —
@@ -149,6 +250,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			Plugins:     pipeline.SnapshotPlugins(pctx.Extensions.Custom),
 			Identity:    pipeline.SnapshotIdentity(pctx),
 			Host:        pctx.Host,
+			TLS:         eventTLS(pctx),
 		})
 	}
 
@@ -237,6 +339,7 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 			StatusCode:  resp.StatusCode,
 			Error:       pipeline.DeriveError(pctx),
 			Duration:    pipeline.DurationSince(pctx.StartedAt),
+			TLS:         eventTLS(pctx),
 		})
 	}
 	return nil
@@ -298,6 +401,7 @@ func (s *Server) recordInboundReject(pctx *pipeline.Context, action pipeline.Act
 			Code:    code,
 			Message: message,
 		},
+		TLS: eventTLS(pctx),
 	}
 	s.Sessions.Append(sid, ev)
 }

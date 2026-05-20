@@ -98,7 +98,10 @@ func TestForwardProxy_Exchange(t *testing.T) {
 
 func TestForwardProxy_CONNECT_Rejected(t *testing.T) {
 	a := auth.New(auth.Config{})
-	srv := NewServer(outboundPipelineFromAuth(t, a), nil)
+	srv, err := NewServer(outboundPipelineFromAuth(t, a), nil, nil)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
 	proxy := httptest.NewServer(srv.Handler())
 	defer proxy.Close()
 
@@ -119,7 +122,10 @@ func TestForwardProxy_Deny(t *testing.T) {
 		NoTokenPolicy: auth.NoTokenPolicyDeny,
 	})
 
-	srv := NewServer(outboundPipelineFromAuth(t, a), nil)
+	srv, err := NewServer(outboundPipelineFromAuth(t, a), nil, nil)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
 	proxy := httptest.NewServer(srv.Handler())
 	defer proxy.Close()
 
