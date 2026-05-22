@@ -168,7 +168,7 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodConnect {
-		http.Error(w, `{"error":"HTTPS CONNECT not supported — only HTTP proxy"}`, http.StatusMethodNotAllowed)
+		s.handleConnect(w, r)
 		return
 	}
 
@@ -403,4 +403,100 @@ func (s *Server) recordOutboundReject(pctx *pipeline.Context, action pipeline.Ac
 		},
 	}
 	s.Sessions.Append(sid, ev)
+}
+
+// connectDialTimeout bounds the upstream TCP dial for a CONNECT tunnel.
+// Once the tunnel is open the timeout no longer applies — the agent's TLS
+// handshake and subsequent traffic flow at their own pace.
+const connectDialTimeout = 30 * time.Second
+
+// handleConnect tunnels HTTPS (and any other TLS-wrapped protocol) through
+// the forward proxy as raw TCP. Mirrors the TLS-passthrough behavior of
+// envoy-sidecar mode: bytes are opaque to the proxy, so token-exchange and
+// the protocol parsers (mcp-parser, inference-parser) are no-ops by
+// definition. Pipeline gates (ibac, jwt-validation bypass logic, etc.)
+// still run on the CONNECT request itself so they can reject based on
+// destination host before the tunnel opens.
+//
+// mTLS is intentionally NOT applied to the upstream dial — the bytes
+// flowing through this tunnel ARE the agent's own end-to-end TLS, and
+// terminating that with sidecar-to-sidecar mTLS would break the agent's
+// trust path. CONNECT targets are opaque externals (LiteMaaS, Bedrock,
+// GitHub API, etc.) where the agent's existing TLS is the right answer.
+func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
+	pctx := &pipeline.Context{
+		Direction: pipeline.Outbound,
+		Scheme:    "tcp", // marker: bytes are opaque, not HTTP
+		Host:      r.Host,
+		Path:      "",
+		Headers:   r.Header.Clone(),
+		StartedAt: time.Now(),
+	}
+	defer func() {
+		s.OutboundPipeline.RunFinish(r.Context(), pctx, pipeline.OutcomeFromContext(pctx))
+	}()
+
+	if s.Sessions != nil {
+		if aid := s.Sessions.ActiveSession(); aid != "" {
+			pctx.Session = s.Sessions.View(aid)
+		}
+	}
+
+	// Run the outbound pipeline. Plugins that policy on host/identity
+	// (ibac, content gates) still get to allow/deny; plugins that need
+	// HTTP body (parsers) see no body, which they handle gracefully.
+	action := s.OutboundPipeline.Run(r.Context(), pctx)
+	if action.Type == pipeline.Reject {
+		s.recordOutboundReject(pctx, action)
+		httpx.WriteRejection(w, action)
+		return
+	}
+
+	// Hijack BEFORE dialing upstream — if hijacking isn't supported
+	// the failure mode should be a 500 to the client, not a half-opened
+	// TCP connection to the upstream.
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		slog.Error("forward-proxy: ResponseWriter does not support hijacking", "host", r.Host)
+		http.Error(w, `{"error":"connect not supported by listener"}`, http.StatusInternalServerError)
+		return
+	}
+
+	// Plain TCP dial. See package-level comment on why mTLS doesn't
+	// apply here. r.Host on a CONNECT carries "host:port" already.
+	upstream, err := net.DialTimeout("tcp", r.Host, connectDialTimeout)
+	if err != nil {
+		slog.Warn("forward-proxy: CONNECT upstream dial failed", "host", r.Host, "error", err)
+		http.Error(w, `{"error":"bad gateway"}`, http.StatusBadGateway)
+		return
+	}
+
+	clientConn, _, err := hijacker.Hijack()
+	if err != nil {
+		_ = upstream.Close()
+		slog.Error("forward-proxy: CONNECT hijack failed", "host", r.Host, "error", err)
+		return
+	}
+
+	// Tell the agent the tunnel is up. Per RFC 7231 §4.3.6 a 200 to
+	// CONNECT signals "tunnel established"; the body is empty and any
+	// subsequent bytes from either side are application data.
+	if _, err := clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
+		_ = clientConn.Close()
+		_ = upstream.Close()
+		slog.Debug("forward-proxy: CONNECT 200 write failed", "host", r.Host, "error", err)
+		return
+	}
+
+	// Bidirectional copy. When either side closes, propagate the close
+	// to the other so both io.Copy goroutines exit. Close-on-each-side
+	// is idempotent on net.Conn.
+	go func() {
+		_, _ = io.Copy(upstream, clientConn)
+		_ = upstream.Close()
+		_ = clientConn.Close()
+	}()
+	_, _ = io.Copy(clientConn, upstream)
+	_ = clientConn.Close()
+	_ = upstream.Close()
 }
