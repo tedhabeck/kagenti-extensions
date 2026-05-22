@@ -11,10 +11,10 @@ import (
 	"time"
 
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/bypass"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/jwtvalidation/validation"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenexchange/cache"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenexchange/exchange"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/routing"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/jwtvalidation/validation"
 )
 
 // IdentityConfig holds the agent's identity for audience validation and token exchange.
@@ -24,10 +24,6 @@ type IdentityConfig struct {
 	Issuer    string   // expected JWT iss (jwt-validation); inbound debug logging only
 }
 
-// ActorTokenSource provides actor tokens for RFC 8693 Section 4.1 act claim chaining.
-// Returns ("", nil) when no actor token is available.
-type ActorTokenSource func(ctx context.Context) (string, error)
-
 // AudienceDeriver derives a target audience from a request host.
 // Used by waypoint mode to auto-derive audience from the destination service name.
 // Returns "" if no derivation is possible (falls back to route config).
@@ -35,31 +31,29 @@ type AudienceDeriver func(host string) string
 
 // Config holds the resolved dependencies for the auth layer.
 type Config struct {
-	Verifier         validation.Verifier
-	Exchanger        *exchange.Client
-	Cache            *cache.Cache
-	Bypass           *bypass.Matcher
-	Router           *routing.Router
-	Identity         IdentityConfig
-	NoTokenPolicy    string           // NoTokenClientCredentials, NoTokenAllow, or NoTokenDeny
-	ActorTokenSource ActorTokenSource // optional, for act claim chaining
-	AudienceDeriver  AudienceDeriver  // optional, derives audience from host (waypoint mode)
-	Logger           *slog.Logger
+	Verifier        validation.Verifier
+	Exchanger       *exchange.Client
+	Cache           *cache.Cache
+	Bypass          *bypass.Matcher
+	Router          *routing.Router
+	Identity        IdentityConfig
+	NoTokenPolicy   string          // NoTokenClientCredentials, NoTokenAllow, or NoTokenDeny
+	AudienceDeriver AudienceDeriver // optional, derives audience from host (waypoint mode)
+	Logger          *slog.Logger
 }
 
 // Auth composes authlib building blocks into inbound validation and outbound exchange.
 type Auth struct {
-	verifier         validation.Verifier
-	exchanger        *exchange.Client
-	cache            *cache.Cache
-	bypass           *bypass.Matcher
-	router           *routing.Router
-	identity         atomic.Pointer[IdentityConfig]
-	noTokenPolicy    string
-	actorTokenSource ActorTokenSource
-	audienceDeriver  AudienceDeriver
-	log              *slog.Logger
-	Stats            *Stats
+	verifier        validation.Verifier
+	exchanger       *exchange.Client
+	cache           *cache.Cache
+	bypass          *bypass.Matcher
+	router          *routing.Router
+	identity        atomic.Pointer[IdentityConfig]
+	noTokenPolicy   string
+	audienceDeriver AudienceDeriver
+	log             *slog.Logger
+	Stats           *Stats
 }
 
 // Stats holds statistics for validation and exchange.
@@ -233,16 +227,15 @@ func New(cfg Config) *Auth {
 		logger = slog.Default()
 	}
 	a := &Auth{
-		verifier:         cfg.Verifier,
-		exchanger:        cfg.Exchanger,
-		cache:            cfg.Cache,
-		bypass:           cfg.Bypass,
-		router:           cfg.Router,
-		noTokenPolicy:    cfg.NoTokenPolicy,
-		actorTokenSource: cfg.ActorTokenSource,
-		audienceDeriver:  cfg.AudienceDeriver,
-		log:              logger,
-		Stats:            NewStats(),
+		verifier:        cfg.Verifier,
+		exchanger:       cfg.Exchanger,
+		cache:           cfg.Cache,
+		bypass:          cfg.Bypass,
+		router:          cfg.Router,
+		noTokenPolicy:   cfg.NoTokenPolicy,
+		audienceDeriver: cfg.AudienceDeriver,
+		log:             logger,
+		Stats:           NewStats(),
 	}
 	id := cfg.Identity
 	a.identity.Store(&id)
@@ -443,22 +436,13 @@ func (a *Auth) HandleOutbound(ctx context.Context, authHeader, host string) *Out
 		return &OutboundResult{Action: ActionAllow}
 	}
 
-	// Obtain actor token for act claim chaining (RFC 8693 Section 4.1)
-	var actorToken string
-	if a.actorTokenSource != nil {
-		var err error
-		actorToken, err = a.actorTokenSource(ctx)
-		if err != nil {
-			a.log.Warn("failed to obtain actor token, proceeding without",
-				"error", err, "host", host)
-		}
-	}
-
+	// RFC 8693 Section 4.1 actor-token "act" claim chaining is not yet
+	// wired by any plugin; the wire-format support stays in
+	// exchange.ExchangeRequest.ActorToken for when a plugin needs it.
 	resp, err := a.exchanger.Exchange(ctx, &exchange.ExchangeRequest{
 		SubjectToken:  subjectToken,
 		Audience:      audience,
 		Scopes:        scopes,
-		ActorToken:    actorToken,
 		TokenEndpoint: resolved.TokenEndpoint, // per-route override
 	})
 	if err != nil {
@@ -468,7 +452,6 @@ func (a *Auth) HandleOutbound(ctx context.Context, authHeader, host string) *Out
 			"host", host,
 			"audience", audience,
 			"scopes", scopes,
-			"hasActorToken", actorToken != "",
 			"tokenEndpoint", resolved.TokenEndpoint,
 			"error", err)
 		return &OutboundResult{

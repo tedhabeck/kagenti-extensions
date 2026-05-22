@@ -11,10 +11,10 @@ import (
 	"time"
 
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/bypass"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/jwtvalidation/validation"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenexchange/cache"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenexchange/exchange"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/routing"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/jwtvalidation/validation"
 )
 
 // mockVerifier captures the audiences arg and returns configured claims/error.
@@ -355,42 +355,6 @@ func TestHandleOutbound_PerRouteTokenEndpoint(t *testing.T) {
 	result := a.HandleOutbound(context.Background(), "Bearer token", "custom-svc")
 	if result.Action != ActionReplaceToken || result.Token != "from-route-endpoint" {
 		t.Errorf("expected token from route endpoint, got action=%s token=%q", result.Action, result.Token)
-	}
-}
-
-func TestHandleOutbound_ActorToken(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := r.ParseForm(); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		if got := r.FormValue("actor_token"); got != "actor-jwt" {
-			t.Errorf("actor_token = %q, want actor-jwt", got)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"access_token": "delegated",
-			"token_type":   "Bearer",
-			"expires_in":   300,
-		})
-	}))
-	defer srv.Close()
-
-	router, _ := routing.NewRouter("exchange", []routing.Route{})
-	exchanger := exchange.NewClient(srv.URL, &exchange.ClientSecretAuth{
-		ClientID: "agent", ClientSecret: "secret",
-	})
-	a := New(Config{
-		Router:    router,
-		Exchanger: exchanger,
-		ActorTokenSource: func(_ context.Context) (string, error) {
-			return "actor-jwt", nil
-		},
-	})
-
-	result := a.HandleOutbound(context.Background(), "Bearer user-token", "any-svc")
-	if result.Action != ActionReplaceToken || result.Token != "delegated" {
-		t.Errorf("expected delegated token, got action=%s token=%q", result.Action, result.Token)
 	}
 }
 
