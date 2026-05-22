@@ -61,17 +61,15 @@ const (
 // directions; if asymmetric needs surface later, this can split into
 // separate Inbound / Outbound sub-blocks without breaking the
 // existing flat shape.
+//
+// X.509-SVID material is supplied by the in-process Provider (see
+// SPIFFEConfig) and no longer configured here. Legacy chart configs may
+// still ship cert_file / key_file / bundle_file keys; the YAML loader
+// silently drops them (pinned by TestLoad_UnknownMTLSFields_Ignored).
 type MTLSConfig struct {
 	// Mode controls the inbound + outbound TLS posture. Defaults to
 	// permissive when empty.
 	Mode MTLSMode `yaml:"mode" json:"mode"`
-
-	// CertFile / KeyFile / BundleFile point at spiffe-helper output.
-	// Defaults to /opt/svid.pem, /opt/svid_key.pem, /opt/svid_bundle.pem
-	// (matching the kagenti chart's helper.conf template).
-	CertFile   string `yaml:"cert_file" json:"cert_file"`
-	KeyFile    string `yaml:"key_file" json:"key_file"`
-	BundleFile string `yaml:"bundle_file" json:"bundle_file"`
 }
 
 // ResolvedMode returns Mode with the empty-string default applied.
@@ -82,10 +80,9 @@ func (m *MTLSConfig) ResolvedMode() MTLSMode {
 	return m.Mode
 }
 
-// Validate rejects unknown mode values at startup. Cert / key /
-// bundle paths are validated lazily by the X509Source — operators
-// can ship a config that points at not-yet-written files (cold
-// start), and the source's wait-for-credential pattern handles it.
+// Validate rejects unknown mode values at startup. SVID material is
+// supplied by the SPIFFE Provider (see SPIFFEConfig); validation of
+// that material is the Provider's responsibility, not this struct's.
 func (m *MTLSConfig) Validate() error {
 	if m == nil {
 		return nil
@@ -97,34 +94,6 @@ func (m *MTLSConfig) Validate() error {
 		return fmt.Errorf("mtls.mode: %q is not a recognized value (use %q or %q)",
 			m.Mode, MTLSModePermissive, MTLSModeStrict)
 	}
-}
-
-// CheckPathsReadable stats the cert / key / bundle paths and returns
-// the list of paths that are NOT yet readable. Empty list means
-// everything is in place. Used by the cmd binaries at startup to
-// emit an early WARN when a path is misconfigured (typo, wrong
-// volume mount) — separates that case from the legitimate cold-start
-// "spiffe-helper hasn't written yet" pattern, which the X509Source's
-// per-handshake re-read already handles.
-//
-// The presence of unreadable paths is not a fatal error: returning
-// them as a list lets the caller decide. cmd binaries log a WARN and
-// continue; tests / verifiers can fail-fast if they want stricter
-// semantics.
-func (m *MTLSConfig) CheckPathsReadable() []string {
-	if m == nil {
-		return nil
-	}
-	var missing []string
-	for _, p := range []string{m.CertFile, m.KeyFile, m.BundleFile} {
-		if p == "" {
-			continue // shouldn't happen post-Load (defaults applied)
-		}
-		if _, err := os.Stat(p); err != nil {
-			missing = append(missing, p)
-		}
-	}
-	return missing
 }
 
 // SPIFFEConfig is the top-level SPIFFE provider configuration. One block
@@ -396,22 +365,10 @@ func Load(path string) (*Config, error) {
 		cfg.Stats.StatsAddress = ":9093"
 	}
 
-	// mTLS validation + path defaults. The cert paths default to
-	// spiffe-helper's known output locations so operators can flip
-	// `mtls: { mode: permissive }` without spelling them out.
+	// mTLS validation. SVID material now comes from the SPIFFE Provider
+	// (see SPIFFEConfig) — there are no per-mtls path fields to default.
 	if err := cfg.MTLS.Validate(); err != nil {
 		return nil, err
-	}
-	if cfg.MTLS != nil {
-		if cfg.MTLS.CertFile == "" {
-			cfg.MTLS.CertFile = "/opt/svid.pem"
-		}
-		if cfg.MTLS.KeyFile == "" {
-			cfg.MTLS.KeyFile = "/opt/svid_key.pem"
-		}
-		if cfg.MTLS.BundleFile == "" {
-			cfg.MTLS.BundleFile = "/opt/svid_bundle.pem"
-		}
 	}
 
 	// SPIFFE defaults match the helper.conf-driven setup: SPIRE agent
