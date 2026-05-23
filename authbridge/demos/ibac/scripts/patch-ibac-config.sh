@@ -116,31 +116,53 @@ for d in ("inbound", "outbound"):
     print(f"      {d}: {names}")
 '
 
-# Block until the sidecar's filesystem watcher picks up the new
-# ConfigMap content and swaps pipelines. kubelet syncs projected
-# volumes on roughly a 60s cycle, so the reload typically lands in
-# 5-90s. Only runs when we actually changed the CM (above no-op
-# short-circuit handles re-runs).
-TIMEOUT=${RELOAD_TIMEOUT:-120}
+# Block until the running authbridge process is using a config whose
+# SHA-256 matches what we just applied. The sidecar exposes its
+# active config's SHA at :9093/reload/status (`active_config_sha256`);
+# we compare it to the SHA of the merged YAML. This handles both
+# convergence pathways uniformly:
+#
+#   - Hot-reload: same pod, the reloader detects the projected-volume
+#     symlink swap (kubelet syncs every ~60s) and rebuilds pipelines;
+#     active_config_sha256 advances on swap completion.
+#   - Pod-roll: a fresh pod (e.g. operator's reconciler restarted the
+#     deployment) boots with the patched ConfigMap mounted from the
+#     start, so its initial active_config_sha256 already matches.
+#
+# Tailing logs for "reloader: pipelines swapped" only catches the
+# hot-reload path and misses the pod-roll path entirely (the new
+# pod's startup never logs a "swap" — it loaded the right config at
+# boot). The SHA check is correct in both cases.
+WANT_SHA=$(printf '%s' "$MERGED_YAML" | sha256sum | awk '{print $1}')
+TIMEOUT=${RELOAD_TIMEOUT:-180}
 DEADLINE=$(( $(date +%s) + TIMEOUT ))
-SINCE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-echo "[*] Waiting for authbridge to hot-reload (timeout ${TIMEOUT}s) ..."
+echo "[*] Waiting for authbridge to load the patched config (timeout ${TIMEOUT}s)"
+echo "    target SHA: $WANT_SHA"
+
+ACTIVE_SHA=""
 while [[ $(date +%s) -lt $DEADLINE ]]; do
-  if kubectl -n "$NAMESPACE" logs deploy/"$AGENT_NAME" -c authbridge-proxy \
-        --since-time="$SINCE" 2>/dev/null \
-        | grep -F "reloader: pipelines swapped" >/dev/null; then
-    echo "[*] Reload confirmed."
+  ACTIVE_SHA=$(kubectl -n "$NAMESPACE" exec deploy/"$AGENT_NAME" -c authbridge-proxy -- \
+      wget -q -O - http://localhost:9093/reload/status 2>/dev/null | \
+      python3 -c 'import json, sys
+try:
+    print(json.load(sys.stdin).get("active_config_sha256", ""))
+except Exception:
+    pass' 2>/dev/null || true)
+  if [[ "$ACTIVE_SHA" == "$WANT_SHA" ]]; then
+    echo "[*] Active config SHA matches — patch is live."
     exit 0
   fi
   sleep 3
 done
 
-echo "ERROR: authbridge did not log 'reloader: pipelines swapped' within ${TIMEOUT}s." >&2
+echo "ERROR: authbridge active config did not match patched SHA within ${TIMEOUT}s." >&2
+echo "       want:        $WANT_SHA" >&2
+echo "       last active: ${ACTIVE_SHA:-<none>}" >&2
 echo "       Last 20 lines of the authbridge container:" >&2
 kubectl -n "$NAMESPACE" logs deploy/"$AGENT_NAME" -c authbridge-proxy --tail=20 >&2 || true
 echo >&2
 echo "       Likely causes:" >&2
-echo "         - ConfigMap parse error (check 'reload failed' lines above)" >&2
-echo "         - kubelet hasn't synced the projected volume yet (re-run patch-config)" >&2
-echo "         - operator restarted and overwrote your patch (re-run patch-config)" >&2
+echo "         - ConfigMap parse error (look for 'reload failed' above)" >&2
+echo "         - kubelet sync slow (retry: RELOAD_TIMEOUT=300 make patch-config)" >&2
+echo "         - operator reconciler reverted the patch (re-run patch-config)" >&2
 exit 1
