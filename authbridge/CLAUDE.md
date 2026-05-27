@@ -265,8 +265,8 @@ preserved.
 
 When the runtime config carries an `mtls:` block, authbridge enables
 transport-level mTLS on the proxy-sidecar listeners (forward + reverse
-proxy). envoy-sidecar mode is unaffected — Envoy handles its own TLS
-via SDS independently.
+proxy). envoy-sidecar mode handles mTLS at the Envoy data-plane level
+instead — see the **envoy-sidecar mTLS** subsection below.
 
 ```yaml
 # authbridge-runtime ConfigMap (top-level)
@@ -293,6 +293,56 @@ per-caller decisions read `pctx.PeerCert` and check the URI SAN.
 **Hot-reload boundary:** mTLS config (`mtls.mode`, cert paths) requires a
 pod restart to apply, matching the existing rule for `listener.*`
 addresses. Plugin-pipeline config keeps its own hot-reload behavior.
+
+### envoy-sidecar mTLS
+
+In envoy-sidecar mode the listeners live in Envoy, not authbridge,
+so the top-level `mtls:` block is a no-op there. Equivalent semantics
+are configured at the Envoy data-plane level by extending the
+`envoy-config` ConfigMap with TLS blocks:
+
+| Mode | Inbound (`:15124`) | Outbound (`:15123`) |
+|---|---|---|
+| `disabled` | plaintext (today's behavior) | plaintext (today's behavior) |
+| `permissive` | `tls_inspector` listener filter + two filter chains: `transport_protocol: tls` chain terminates mTLS, `transport_protocol: raw_buffer` chain accepts plaintext | **plaintext** — no TLS-wrap attempt |
+| `strict` | `tls_inspector` + single TLS filter chain; plaintext drops at filter chain match | `UpstreamTlsContext` on the `original_destination` cluster: TLS-or-fail, blanket |
+
+X.509 SVIDs are read by Envoy directly from `/opt/svid.pem`,
+`/opt/svid_key.pem`, `/opt/svid_bundle.pem` — the same paths
+proxy-sidecar's mTLS uses. The spiffe Provider's file-mirror in
+the `authbridge-envoy` binary keeps these fresh on rotation.
+
+**Inbound parity with proxy-sidecar:** byte-identical observable
+semantics — TLS handshakes terminate against the SPIRE trust bundle,
+plaintext is served (permissive) or rejected (strict). Same outcome
+as proxy-sidecar's `tlssniff.Listener`, just expressed as Envoy
+filter chains. This matches Istio's PERMISSIVE/STRICT inbound exactly.
+
+**Outbound is Istio-shaped, not proxy-sidecar-shaped:** Envoy has
+no native primitive for "try TLS, fall back to plaintext on handshake
+failure" within an `ORIGINAL_DST` cluster (and Istio itself doesn't do
+it — Pilot pre-decides mesh membership). So envoy-sidecar's
+permissive mode keeps outbound plaintext, and strict mode does
+blanket TLS-or-fail to everything the listener sees. This works in
+practice because outbound calls that need plaintext — Keycloak,
+JWKS, external HTTPS — never reach the listener: plugin outbound
+uses Go `net/http` directly, and `proxy-init`'s iptables doesn't
+redirect arbitrary HTTPS egress.
+
+**Behavioral gap to know:** a *permissive* envoy-sidecar caller
+cannot reach a *strict* peer (its outbound is plaintext; the peer's
+strict inbound rejects it). proxy-sidecar permissive can, because
+its outbound dialer tries TLS first per-connection. Mixed-mode
+deployments need both ends compatible — both strict, both permissive,
+or one strict + the other permissive on inbound only.
+
+The kagenti-operator's AgentRuntime CR has an `Spec.MTLSMode` field
+but currently rejects `mtlsMode != disabled` with `envoy-sidecar`
+at admission. The `authbridge/demos/mtls/` envoy-sidecar variant
+(`make demo-mtls-envoy*`) bypasses that gate by swapping the
+namespace `envoy-config` ConfigMap directly; the operator follow-up
+PR will close the gap by rendering per-agent envoy-config from
+`Spec.MTLSMode`.
 
 ## Build and Deploy
 

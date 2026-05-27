@@ -99,12 +99,15 @@ func main() {
 	}
 
 	// Build the SPIFFE Provider when the spiffe block is configured.
-	// envoy-sidecar mode currently doesn't terminate mTLS at this
-	// process — Envoy does TCP passthrough — so X509Source() is unused
+	// envoy-sidecar mode terminates mTLS in Envoy itself (via the
+	// file-based DownstreamTlsContext / UpstreamTlsContext referencing
+	// /opt/svid*.pem in the rendered envoy-config) — this binary
+	// doesn't see the TLS bytes directly, so X509Source() isn't read
 	// here. The Provider is still needed because token-exchange's
 	// spiffe identity path consumes a JWTSource via DI, and the file
-	// mirror keeps /opt/jwt_svid.token (and the X.509 SVID files)
-	// fresh on disk for Envoy and downstream consumers.
+	// mirror is what keeps /opt/svid.pem, /opt/svid_key.pem,
+	// /opt/svid_bundle.pem, and /opt/jwt_svid.token fresh on disk for
+	// Envoy and other consumers.
 	//
 	// We need cfg first to read the spiffe block, so do a one-shot
 	// Load before buildPipelines runs (buildPipelines re-Loads
