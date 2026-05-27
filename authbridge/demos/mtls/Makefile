@@ -14,8 +14,7 @@ help:
 deploy: ## Deploy caller + callee pods (both with mtls.mode: strict)
 	kubectl apply -f k8s/caller.yaml
 	kubectl apply -f k8s/callee.yaml
-	./scripts/patch-mtls-config.sh $(NAMESPACE) $(CALLER) strict
-	./scripts/patch-mtls-config.sh $(NAMESPACE) $(CALLEE) strict
+	./scripts/patch-mtls-config.sh $(NAMESPACE) strict
 	kubectl -n $(NAMESPACE) rollout restart deploy/$(CALLER) deploy/$(CALLEE)
 	kubectl -n $(NAMESPACE) rollout status deploy/$(CALLER) deploy/$(CALLEE) --timeout=120s
 
@@ -27,8 +26,7 @@ demo-mtls: deploy ## Deploy + run the encryption-on-the-wire check (strict mode)
 demo-mtls-permissive: ## Same shape but with mtls.mode: permissive; verify mixed-mode serving
 	kubectl apply -f k8s/caller.yaml
 	kubectl apply -f k8s/callee.yaml
-	./scripts/patch-mtls-config.sh $(NAMESPACE) $(CALLER) permissive
-	./scripts/patch-mtls-config.sh $(NAMESPACE) $(CALLEE) permissive
+	./scripts/patch-mtls-config.sh $(NAMESPACE) permissive
 	kubectl -n $(NAMESPACE) rollout restart deploy/$(CALLER) deploy/$(CALLEE)
 	kubectl -n $(NAMESPACE) rollout status deploy/$(CALLER) deploy/$(CALLEE) --timeout=120s
 	./scripts/verify-permissive.sh $(NAMESPACE) $(CALLEE)

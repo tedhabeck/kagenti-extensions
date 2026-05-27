@@ -1,19 +1,18 @@
 # mTLS demo — agent-to-agent encryption via SPIRE X.509 SVIDs
 
-> **Status (2026-05-27).** The **envoy-sidecar variant**
-> (`make demo-mtls-envoy*`) is verified end-to-end on a kind +
-> kagenti + SPIRE cluster; see the
-> [envoy-sidecar variant](#envoy-sidecar-variant) section below.
-> The **proxy-sidecar variant** (`make demo-mtls`) currently fails
-> at the verification step: the kagenti-operator's controller
-> reconciles per-agent `authbridge-config-*` ConfigMaps and reverts
-> the `mtls:` block that `patch-mtls-config.sh` writes, before the
-> restarted pod can mount it. Both demos are blocked on the same
-> upstream operator bug — see [Operator bugs uncovered](#operator-bugs-uncovered).
-> The Pod manifests in `k8s/{caller,callee}.yaml` were also missing
-> the `kagenti.io/type: agent` label that the operator's
-> mutating-webhook objectSelector requires; both demos' manifests
-> have been updated to include it.
+> **Status.** Both variants are verified end-to-end on a kind +
+> kagenti + SPIRE cluster — `make demo-mtls` (proxy-sidecar) and
+> `make demo-mtls-envoy*` (envoy-sidecar; see the
+> [envoy-sidecar variant](#envoy-sidecar-variant) section below).
+> An earlier revision of this README flagged the proxy-sidecar demo
+> as broken because `patch-mtls-config.sh` was patching the per-agent
+> `authbridge-config-<name>` ConfigMap, which the operator's
+> pod-mutating webhook re-renders (and scrubs `mtls:` from) on each
+> pod admission. The script now patches the namespace's
+> `authbridge-runtime-config` ConfigMap instead, where the
+> operator's resolution chain reads `mtls.mode` and propagates it
+> into every per-agent CM at admission time — one patch, all
+> workloads in the namespace pick it up on next pod restart.
 
 Two pods that talk to each other through their authbridge sidecars,
 configured with `mtls.mode: strict`. Confirms end-to-end:
@@ -68,8 +67,11 @@ The `make demo-mtls` target does:
 
 1. Deploys caller + callee Pods to `team1` with operator-injected
    sidecars and SPIRE.
-2. Patches the operator-rendered `authbridge-config-{caller,callee}`
-   ConfigMaps to add `mtls: { mode: strict }`.
+2. Patches the namespace's `authbridge-runtime-config` ConfigMap to
+   add `mtls: { mode: strict }`. The operator's resolution chain
+   reads `mtls.mode` from this CM and bakes it into every per-agent
+   CM in the namespace at the next pod admission — one patch, all
+   workloads pick it up.
 3. Restarts the pods so the new config takes effect (mTLS config
    requires pod restart per the framework hot-reload boundary).
 4. Triggers a request from caller → callee through the kagenti UI
@@ -132,9 +134,9 @@ matches Istio's PERMISSIVE/STRICT inbound exactly).
 Outbound is **Istio-shaped**: there is no per-connection
 try-then-fallback (Envoy has no native primitive for it, and Istio
 itself doesn't do it — it relies on Pilot pre-deciding mesh
-membership). Blanket TLS in strict mode is practical for the same
-reason proxy-sidecar's strict mode is: outbound calls that need
-plaintext (Keycloak / JWKS / external HTTPS) never hit the listener:
+membership). Blanket TLS in strict mode is practical because outbound
+calls that need plaintext (Keycloak / JWKS / external HTTPS) never
+hit the listener:
 
 1. Plugin outbound (token-exchange, jwt-validation talking to
    Keycloak / JWKS) uses Go's `net/http` directly — bypasses Envoy.
@@ -143,23 +145,25 @@ plaintext (Keycloak / JWKS / external HTTPS) never hit the listener:
 3. HTTP from the app to peer agents — what gets TLS-wrapped. Peer's
    inbound listener terminates. Works.
 
-### Behavioral gap vs proxy-sidecar
+**Proxy-sidecar matches the same outbound semantics now**: its
+forward proxy dials plaintext in permissive mode and TLS-or-fail in
+strict, with no per-connection fallback. The two deployment shapes
+share one outbound model. See `authbridge/CLAUDE.md`'s
+"Top-level mtls: configuration" for the full table.
 
-In proxy-sidecar, a *permissive* caller can reach a *strict* peer
-because its outbound dialer tries TLS first per-connection and the
-handshake succeeds. In envoy-sidecar permissive, outbound is
-plaintext, so a permissive envoy-sidecar caller calling a strict
-peer **fails**. Mixed-mode deployments need both ends compatible
-(both strict, both permissive, or one strict + the other permissive
-on inbound only). The framework documentation in
-[`authbridge/CLAUDE.md`](../../CLAUDE.md#top-level-mtls-configuration)
-calls this out.
+### Mixed-mode caveat
+
+A *permissive* caller cannot reach a *strict* peer regardless of
+mode (its outbound is plaintext; the peer's strict inbound rejects
+it). Mixed-mode deployments need both ends compatible — both strict,
+both permissive, or one strict + the other permissive on inbound
+only.
 
 ### How the demo wires mTLS
 
 The demo is fully **hand-crafted** — no `kagenti.io/inject` label,
 no operator pod injection. This sidesteps both
-[operator bugs](#operator-bugs-uncovered): no RO `/opt` mount because
+[operator-side notes](#operator-side-notes): no RO `/opt` mount because
 we control the volumes, no per-agent CM reconciliation because there
 is no per-agent CM (the demo brings its own `envoy-config-mtls-active`
 and `authbridge-runtime-mtls` CMs that the operator doesn't touch).
@@ -195,85 +199,63 @@ and per-agent CM rendering; once it lands, the user sets
 and the operator wires up the same Envoy YAML this demo ships by
 hand.
 
-## Operator bugs uncovered
+## Operator-side notes
 
-Running both variants against a real cluster surfaced three
-kagenti-operator issues. Two of them block the demos today; the
-third is a Pod-spec selector mismatch this PR works around. The
-kagenti-operator follow-up PR is expected to fix #1 and #2; #3 is
-already fixed by the manifest updates in this PR.
+Running both variants against a real cluster surfaced two
+kagenti-operator items worth knowing about. Both are addressed in
+the kagenti-operator companion PR. A third issue (Pod-spec selector
+mismatch) was a demo-side oversight already fixed by the manifest
+updates that landed alongside the envoy-sidecar variant.
 
-### #1 — `/opt` mounted `readOnly:true` on envoy-sidecar's `envoy-proxy` container
+### `/opt` mount asymmetry on envoy-sidecar (operator bug, fixed in companion PR)
 
-Verified empirically:
-- proxy-sidecar `authbridge-proxy` container mounts `svid-output`
-  at `/opt` with `readOnly` defaulted (false → RW).
-- envoy-sidecar `envoy-proxy` container mounts the same volume at
-  `/opt` with `readOnly: true`.
-
+The kagenti-operator's pod mutator was mounting `svid-output` at
+`/opt` with `readOnly: true` on envoy-sidecar's `envoy-proxy`
+container while the proxy-sidecar branch correctly mounted it RW.
 The in-process spiffe Provider mirror writes `/opt/svid.pem`,
-`/opt/svid_key.pem`, `/opt/svid_bundle.pem` on every SPIRE rotation;
-under the RO mount the mirror logs:
+`/opt/svid_key.pem`, `/opt/svid_bundle.pem` there on every SPIRE
+rotation; under the RO mount the mirror failed:
 
 ```text
 spiffe.mirror: initial x509 write
   err="write svid.pem: atomicWrite: create temp in /opt: open /opt/.tmp-svid.pem.4183688747: read-only file system"
 ```
 
-Envoy then refuses to boot (`Invalid path: /opt/svid_bundle.pem`)
+Envoy then refused to boot with `Invalid path: /opt/svid_bundle.pem`
 because the file-based `DownstreamTlsContext` / `UpstreamTlsContext`
-references can't resolve. **Affects: envoy-sidecar mode only.** The
-fix is to flip the readOnly bit on the `svid-output` volumeMount in
-the envoy-sidecar branch of `BuildEnvoyProxyContainerWithSpireOption`
-in `kagenti-operator/internal/webhook/injector/container_builder.go`.
+references couldn't resolve. **Affects: envoy-sidecar mode only.**
+The fix landed in the companion PR — flips the readOnly bit on the
+`svid-output` volumeMount in `BuildEnvoyProxyContainerWithSpireOption`
+(`kagenti-operator/internal/webhook/injector/container_builder.go`).
 
-### #2 — Operator controller reconciles per-agent CM, erases user-added fields
+### Per-agent CMs are operator-owned (by-design; reflected in this PR's script)
 
-`patch-mtls-config.sh` writes `mtls: { mode: strict }` into the
-per-agent `authbridge-config-<name>` ConfigMap. Some operator-side
-component (admission webhook on pod creation, or a reconciler watching
-the CM) re-templates the CM back to its operator-rendered shape
-*before* the pod's kubelet-mounted view picks up the patch:
+The kagenti-operator's pod-mutating webhook builds each per-agent
+`authbridge-config-<name>` ConfigMap by reading the namespace
+`authbridge-runtime-config` as baseYAML and overlaying values
+resolved from the AgentRuntime CR (or defaults when no CR exists).
+The webhook's `ensurePerAgentConfigMap` actively scrubs the `mtls:`
+block when the CR's `Spec.MTLSMode` is unset — that scrub is
+intentional, ensuring the per-agent CM's contents track the
+authoritative source (the resolution chain) rather than picking up
+stale fields. Earlier revisions of this demo's `patch-mtls-config.sh`
+patched the per-agent CM directly, so the patch got reverted on the
+next pod admission. The current script patches the namespace
+`authbridge-runtime-config` CM, which is exactly where the operator's
+resolution chain reads it; one patch propagates to every per-agent
+CM in the namespace.
 
-```console
-$ kubectl -n team1 get cm authbridge-config-mtls-caller \
-    -o jsonpath='{.metadata.annotations.kubectl\.kubernetes\.io/last-applied-configuration}' \
-    | jq -r '.data."config.yaml"' | tail -3
-spiffe: {}
-mtls:
-  mode: strict                 ← what patch-mtls-config.sh wrote
+The longer-term path is to set `Spec.MTLSMode: strict` on an
+AgentRuntime CR — the operator's companion PR makes that work
+cleanly for envoy-sidecar too. The namespace-CM patch this demo uses
+is a lighter-weight knob that avoids requiring a CR for every demo
+pod.
 
-$ kubectl -n team1 get cm authbridge-config-mtls-caller \
-    -o jsonpath='{.data.config\.yaml}' | tail -3
-      name: token-exchange
-spiffe: {}                     ← what the operator left after reconcile
-                                  (NO mtls block)
-
-$ kubectl -n team1 logs deploy/mtls-caller -c authbridge-proxy | grep mtls
-"mTLS disabled (no mtls block in config)"
-```
-
-Same pattern applied to my `spiffe.mirror_dir: /shared` workaround
-during envoy-sidecar testing. **Affects: BOTH proxy-sidecar (`make
-demo-mtls`) and envoy-sidecar variants of this demo.** Either the
-reconciler should preserve user-added fields it doesn't manage, or
-the canonical surface should be `Spec.MTLSMode` on the AgentRuntime
-CR with the operator rendering the resulting `mtls:` block — i.e.,
-the operator follow-up PR's plan.
-
-### #3 — Pod selector mismatch (workaround in this PR)
+### Demo pod manifests need `kagenti.io/type: agent`
 
 The kagenti-operator's mutating-webhook `objectSelector` requires
-`kagenti.io/type` in `[agent, tool]`. The demos' Pod templates didn't
-set this label, so no operator injection happened (no authbridge
-sidecar, no per-agent CM created). Either the selector tightened
-recently or the demos haven't been re-run against a current operator.
-
-This PR adds `kagenti.io/type: agent` to all four demo Pod templates
-(`caller.yaml`, `callee.yaml`, `caller-envoy.yaml`, `callee-envoy.yaml`)
-and an explicit `runAsUser: 100` on the `demo-app` container to
-satisfy `runAsNonRoot: true` against the
-`curlimages/curl:latest` image (which now USERs as the non-numeric
-`curl_user`, tripping the kubelet's nonRoot check). With these in
-place the proxy-sidecar demo's Pods at least admit and roll out;
-verification still fails on issue #2 above.
+`kagenti.io/type` in `[agent, tool]`. The demo Pod templates now set
+this label and an explicit `runAsUser: 100` on the `demo-app`
+container (the `curlimages/curl:latest` image runs as the
+non-numeric `curl_user`, which trips the kubelet's `runAsNonRoot`
+check without an explicit numeric UID).

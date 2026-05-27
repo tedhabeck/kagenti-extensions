@@ -212,8 +212,15 @@ func main() {
 		strict := cfg.MTLS.ResolvedMode() == config.MTLSModeStrict
 		src := provider.X509Source()
 		mtlsMetrics = authtls.NewMetrics()
+		// Inbound permissive peeks-and-routes; strict rejects non-TLS.
 		rpMTLS = &reverseproxy.MTLSOptions{Source: src, Strict: strict, Metrics: mtlsMetrics}
-		fpMTLS = &forwardproxy.MTLSOptions{Source: src, Strict: strict, Metrics: mtlsMetrics}
+		// Outbound: TLS-or-fail in strict only. Permissive is plaintext
+		// outbound — see authbridge-proxy/main.go for the architectural
+		// note on why proxy-sidecar's outbound semantics now match
+		// envoy-sidecar's (no per-connection try-TLS-with-fallback).
+		if strict {
+			fpMTLS = &forwardproxy.MTLSOptions{Source: src, Metrics: mtlsMetrics}
+		}
 		slog.Info("mTLS enabled", "mode", cfg.MTLS.ResolvedMode())
 	} else {
 		slog.Info("mTLS disabled (no mtls block in config)")

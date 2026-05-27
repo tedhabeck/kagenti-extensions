@@ -279,7 +279,7 @@ mtls:
 | Mode | Inbound (reverse proxy `:8080`) | Outbound (forward proxy) |
 |---|---|---|
 | (no `mtls` block) | Plaintext only. | Plaintext only. |
-| `permissive` (default when block present) | Byte-peek listener: TLS handshakes verified against the SPIRE trust bundle; plaintext callers served on the same port. ⚠️ Plaintext requests carry their full headers and bodies in the clear — including any `Authorization: Bearer ...` token already injected by `token-exchange`. Use only during rollout with cluster-network trust. | Try TLS first; on handshake failure fall back to plain TCP (one-line WARN log). |
+| `permissive` (default when block present) | Byte-peek listener: TLS handshakes verified against the SPIRE trust bundle; plaintext callers served on the same port. ⚠️ Plaintext requests carry their full headers and bodies in the clear — including any `Authorization: Bearer ...` token already injected by `token-exchange`. Use only during rollout with cluster-network trust. | Plaintext — no TLS-wrap attempt. Matches envoy-sidecar's permissive and Istio's PeerAuthentication semantics (permissive is inbound-only). A permissive caller cannot reach a strict peer; mixed-mode deployments need both ends compatible. |
 | `strict` | TLS only — non-TLS callers get the connection closed. | TLS or fail: handshake failure is a hard error, no fallback. |
 
 In both modes, a successful TLS handshake that fails certificate
@@ -318,31 +318,30 @@ plaintext is served (permissive) or rejected (strict). Same outcome
 as proxy-sidecar's `tlssniff.Listener`, just expressed as Envoy
 filter chains. This matches Istio's PERMISSIVE/STRICT inbound exactly.
 
-**Outbound is Istio-shaped, not proxy-sidecar-shaped:** Envoy has
-no native primitive for "try TLS, fall back to plaintext on handshake
-failure" within an `ORIGINAL_DST` cluster (and Istio itself doesn't do
-it — Pilot pre-decides mesh membership). So envoy-sidecar's
-permissive mode keeps outbound plaintext, and strict mode does
-blanket TLS-or-fail to everything the listener sees. This works in
-practice because outbound calls that need plaintext — Keycloak,
-JWKS, external HTTPS — never reach the listener: plugin outbound
-uses Go `net/http` directly, and `proxy-init`'s iptables doesn't
-redirect arbitrary HTTPS egress.
+**Outbound is Istio-shaped:** Envoy has no native primitive for
+"try TLS, fall back to plaintext on handshake failure" within an
+`ORIGINAL_DST` cluster (and Istio itself doesn't do it — Pilot
+pre-decides mesh membership). Permissive keeps outbound plaintext;
+strict does blanket TLS-or-fail to everything the listener sees.
+This works in practice because outbound calls that need plaintext —
+Keycloak, JWKS, external HTTPS — never reach the listener: plugin
+outbound uses Go `net/http` directly, and `proxy-init`'s iptables
+doesn't redirect arbitrary HTTPS egress. **Proxy-sidecar matches
+this**: its forward proxy now also dials plaintext in permissive
+mode, so the two deployment shapes share one outbound semantics.
 
-**Behavioral gap to know:** a *permissive* envoy-sidecar caller
-cannot reach a *strict* peer (its outbound is plaintext; the peer's
-strict inbound rejects it). proxy-sidecar permissive can, because
-its outbound dialer tries TLS first per-connection. Mixed-mode
-deployments need both ends compatible — both strict, both permissive,
-or one strict + the other permissive on inbound only.
+**Behavioral note:** a *permissive* caller cannot reach a *strict*
+peer regardless of mode (its outbound is plaintext; the peer's
+strict inbound rejects it). Mixed-mode deployments need both ends
+compatible — both strict, both permissive, or one strict + the
+other permissive on inbound only.
 
-The kagenti-operator's AgentRuntime CR has an `Spec.MTLSMode` field
-but currently rejects `mtlsMode != disabled` with `envoy-sidecar`
-at admission. The `authbridge/demos/mtls/` envoy-sidecar variant
-(`make demo-mtls-envoy*`) bypasses that gate by swapping the
-namespace `envoy-config` ConfigMap directly; the operator follow-up
-PR will close the gap by rendering per-agent envoy-config from
-`Spec.MTLSMode`.
+The kagenti-operator's AgentRuntime CR's `Spec.MTLSMode` flows
+through to a per-agent rendered envoy-config with the matching TLS
+blocks (operator companion PR). The `authbridge/demos/mtls/`
+envoy-sidecar variant (`make demo-mtls-envoy*`) ships a hand-crafted
+demo that proves the same Envoy YAML design at the data-plane level
+without needing a CR.
 
 ## Build and Deploy
 

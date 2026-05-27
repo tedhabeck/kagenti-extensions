@@ -35,27 +35,32 @@ type Server struct {
 	Client           *http.Client
 }
 
-// MTLSOptions configures outbound mTLS. When non-nil, the forward
-// proxy's HTTP client uses a custom DialContext that:
+// MTLSOptions configures outbound mTLS for the forward proxy. When
+// non-nil, every outbound dial:
 //
 //  1. opens a plain TCP connection to the destination
 //  2. attempts a TLS handshake using the local SVID
 //  3. on handshake success → returns the *tls.Conn
-//  4. on handshake failure:
-//     - Strict=false: closes, redials plain TCP, returns the plain conn
-//     (with a one-line WARN log naming the destination)
-//     - Strict=true: closes and returns the handshake error
-//  5. successful handshake with verification failure is always a hard
-//     error in both modes (destination misconfigured its identity)
+//  4. on handshake failure → closes and returns the error (TLS-or-fail)
+//
+// There is no per-connection fallback to plaintext. To match Istio's
+// PeerAuthentication semantics — and to keep proxy-sidecar's outbound
+// behavior consistent with envoy-sidecar's, which has no native
+// "try TLS, fall back" primitive — permissive mode does not pass
+// MTLSOptions to NewServer at all (callers leave it nil so the
+// transport stays plaintext). Strict mode passes MTLSOptions and the
+// dial fails closed when the peer can't terminate.
+//
+// A successful handshake whose peer cert fails verification is always
+// a hard error.
 type MTLSOptions struct {
 	Source  spiffe.X509Source
-	Strict  bool
 	Metrics *authtls.Metrics
 }
 
 // NewServer creates a forward proxy server with a default HTTP client.
-// When mtls is non-nil, every outbound dial first tries TLS using the
-// local SVID; mode-aware fallback is described in MTLSOptions.
+// When mtls is non-nil, every outbound dial does TLS-or-fail using the
+// local SVID; see MTLSOptions for semantics.
 func NewServer(outbound *pipeline.Holder, sessions *session.Store, mtls *MTLSOptions) (*Server, error) {
 	transport := &http.Transport{
 		// Sane Go defaults for everything except DialContext, which we
@@ -74,7 +79,7 @@ func NewServer(outbound *pipeline.Holder, sessions *session.Store, mtls *MTLSOpt
 		if err != nil {
 			return nil, fmt.Errorf("forwardproxy: build client tls config: %w", err)
 		}
-		transport.DialContext = mtlsDialer(tlsCfg, mtls.Strict, mtls.Metrics).DialContext
+		transport.DialContext = mtlsDialer(tlsCfg, mtls.Metrics).DialContext
 	}
 
 	return &Server{
@@ -91,21 +96,18 @@ func NewServer(outbound *pipeline.Holder, sessions *session.Store, mtls *MTLSOpt
 }
 
 // mtlsDialer returns a dialer-shaped object whose DialContext does
-// the try-TLS-fall-back-to-plain dance. We construct it once per
-// Server so the *tls.Config / metrics references are stable across
-// connections.
+// TLS-or-fail. We construct it once per Server so the *tls.Config /
+// metrics references are stable across connections.
 type mtlsDialFunc struct {
 	plain   *net.Dialer
 	tlsCfg  *cryptotls.Config
-	strict  bool
 	metrics *authtls.Metrics
 }
 
-func mtlsDialer(cfg *cryptotls.Config, strict bool, metrics *authtls.Metrics) *mtlsDialFunc {
+func mtlsDialer(cfg *cryptotls.Config, metrics *authtls.Metrics) *mtlsDialFunc {
 	return &mtlsDialFunc{
 		plain:   &net.Dialer{Timeout: 10 * time.Second},
 		tlsCfg:  cfg,
-		strict:  strict,
 		metrics: metrics,
 	}
 }
@@ -113,9 +115,8 @@ func mtlsDialer(cfg *cryptotls.Config, strict bool, metrics *authtls.Metrics) *m
 func (d *mtlsDialFunc) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	plain, err := d.plain.DialContext(ctx, network, addr)
 	if err != nil {
-		// TCP failure — never retry as TLS, and never count as a TLS
-		// fallback. Connection refused / DNS failure is a different
-		// kind of bug from "destination doesn't speak TLS."
+		// TCP failure — separate bug class from "peer doesn't speak TLS".
+		// Returned as-is so callers see the underlying dial error.
 		return nil, err
 	}
 
@@ -132,27 +133,10 @@ func (d *mtlsDialFunc) DialContext(ctx context.Context, network, addr string) (n
 	defer cancel()
 	if err := tlsConn.HandshakeContext(hsCtx); err != nil {
 		_ = tlsConn.Close()
-
-		// Strict mode: handshake failure is terminal. Don't fall back.
-		if d.strict {
-			if d.metrics != nil {
-				d.metrics.OutboundFailed.Add(1)
-			}
-			return nil, fmt.Errorf("forwardproxy mtls strict: handshake to %s failed: %w", addr, err)
-		}
-
-		// Permissive mode: redial plain TCP and return that. Surface
-		// the destination so operators can spot persistent fallbacks
-		// in their logs and either install authbridge on the target
-		// or accept the cost. The mode attribute makes the log easy
-		// to grep across mixed-mode rollouts where some sidecars are
-		// permissive and others are strict.
 		if d.metrics != nil {
-			d.metrics.OutboundFellBack.Add(1)
+			d.metrics.OutboundFailed.Add(1)
 		}
-		slog.Warn("mtls fallback to plaintext",
-			"mode", "permissive", "addr", addr, "reason", err.Error())
-		return d.plain.DialContext(ctx, network, addr)
+		return nil, fmt.Errorf("forwardproxy mtls: handshake to %s failed: %w", addr, err)
 	}
 
 	if d.metrics != nil {

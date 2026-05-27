@@ -221,8 +221,20 @@ func main() {
 		strict := cfg.MTLS.ResolvedMode() == config.MTLSModeStrict
 		src := provider.X509Source()
 		mtlsMetrics = authtls.NewMetrics()
+		// Inbound (reverse proxy): permissive peeks-and-routes, strict
+		// rejects non-TLS. Strict bool toggles between the two.
 		rpMTLS = &reverseproxy.MTLSOptions{Source: src, Strict: strict, Metrics: mtlsMetrics}
-		fpMTLS = &forwardproxy.MTLSOptions{Source: src, Strict: strict, Metrics: mtlsMetrics}
+		// Outbound (forward proxy): only attempt TLS in strict mode.
+		// Permissive is plaintext outbound — matches envoy-sidecar's
+		// permissive (Envoy has no native primitive for "try TLS, fall
+		// back on handshake failure", and Istio's PeerAuthentication
+		// permissive is inbound-only). A permissive caller can no
+		// longer reach a strict peer regardless of mode; mixed-mode
+		// deployments need both ends compatible. See authbridge/CLAUDE.md
+		// "Top-level mtls: configuration".
+		if strict {
+			fpMTLS = &forwardproxy.MTLSOptions{Source: src, Metrics: mtlsMetrics}
+		}
 		slog.Info("mTLS enabled", "mode", cfg.MTLS.ResolvedMode())
 	} else {
 		slog.Info("mTLS disabled (no mtls block in config)")
