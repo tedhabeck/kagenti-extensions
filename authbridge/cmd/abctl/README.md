@@ -82,6 +82,7 @@ The UI has three panes. `Enter` drills in; `Esc` backs out.
 | `Esc` | pods | back to namespaces |
 | `Enter` / `→` / `l` | sessions, events | drill into selection |
 | `Esc` / `←` / `h` | detail, events | back out |
+| `Esc` | sessions, pipeline | (picker mode) tear down port-forward and back to pods |
 | `/` | sessions, events | filter (substring match; Enter commits, Esc cancels) |
 | `s` | events | toggle skip-row visibility (default: hidden; the events footer shows the hidden count) |
 | `p` | any | pause/resume stream |

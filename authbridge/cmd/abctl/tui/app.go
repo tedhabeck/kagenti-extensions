@@ -703,6 +703,9 @@ func Run(ctx context.Context, opts RunOptions) error {
 		c := apiclient.New(opts.Endpoint)
 		m = New(ctx, c).(*model)
 	} else {
+		if opts.Lister == nil || opts.PortForwarder == nil {
+			return fmt.Errorf("picker mode requires both Lister and PortForwarder; pass --endpoint to bypass")
+		}
 		m = newPickerModel(ctx, opts.Lister, opts.PortForwarder)
 	}
 	defer func() {

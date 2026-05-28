@@ -60,7 +60,7 @@ and opens a **Namespaces → Pods** picker. Pick `team1`, then the
 weather-service pod — `abctl` spawns a `kubectl port-forward`
 automatically and drops you into the **Sessions** pane:
 
-```
+```text
 ╭─ abctl · http://127.0.0.1:<port> · [Sessions] Pipeline ──────────────────────╮
 │  ID                                       UPDATED    EVENTS  TOKENS   ACTIVE  │
 │  (no sessions yet)                                                             │

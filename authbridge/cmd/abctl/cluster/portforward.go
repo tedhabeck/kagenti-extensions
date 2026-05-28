@@ -113,9 +113,9 @@ func (k *kubectlPortForwarder) Start(ctx context.Context, namespace, pod string)
 		_ = pf.Close()
 		stderrTail := pf.stderrTail()
 		if stderrTail != "" {
-			return nil, fmt.Errorf("port-forward not ready: %v: %s", err, stderrTail)
+			return nil, fmt.Errorf("port-forward not ready: %w: %s", err, stderrTail)
 		}
-		return nil, fmt.Errorf("port-forward not ready: %v", err)
+		return nil, fmt.Errorf("port-forward not ready: %w", err)
 	}
 	return pf, nil
 }

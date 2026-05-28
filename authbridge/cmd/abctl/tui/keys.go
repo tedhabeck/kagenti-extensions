@@ -288,6 +288,9 @@ func (m *model) helpView() string {
 	case panePods:
 		return "[↑↓/jk] nav  [↵] connect  [Esc] back  [q] quit"
 	case paneSessions:
+		if m.parentCtx != nil {
+			return "[↑↓] nav  [↵] drill  [tab] pipeline  [/] filter  [esc] pods  [p] pause  [q] quit"
+		}
 		return "[↑↓] nav  [↵] drill  [tab] pipeline  [/] filter  [p] pause  [q] quit"
 	case paneEvents:
 		base := "[↑↓] nav  [↵] detail  [esc] back  [/] filter  [s] skips  [p] pause  [q] quit"
@@ -302,6 +305,9 @@ func (m *model) helpView() string {
 	case paneDetail:
 		return "[↑↓] scroll  [y] yank  [esc] back  [q] quit"
 	case panePipeline:
+		if m.parentCtx != nil {
+			return "[↑↓] nav  [↵] plugin detail  [tab] sessions  [esc] pods  [q] quit"
+		}
 		return "[↑↓] nav  [↵] plugin detail  [tab] sessions  [q] quit"
 	case panePluginDetail:
 		return "[↑↓] scroll  [esc] back  [q] quit"

@@ -50,7 +50,12 @@ func TestE2ESmoke(t *testing.T) {
 	}
 	defer pf.Close()
 
-	resp, err := http.Get(pf.Endpoint() + "/healthz")
+	req, err := http.NewRequestWithContext(ctx, "GET", pf.Endpoint()+"/healthz", nil)
+	if err != nil {
+		t.Fatalf("build /healthz request: %v", err)
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("GET /healthz: %v", err)
 	}
