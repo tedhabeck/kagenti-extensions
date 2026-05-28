@@ -21,6 +21,7 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			}
 			return nil
 		case "q", "esc", "ctrl+c":
+			m.cancel()
 			return tea.Quit
 		}
 		var cmd tea.Cmd
@@ -52,6 +53,7 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			m.pickerErr = ""
 			return nil
 		case "q", "ctrl+c":
+			m.cancel()
 			return tea.Quit
 		}
 		var cmd tea.Cmd
