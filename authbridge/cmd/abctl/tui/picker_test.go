@@ -183,5 +183,16 @@ func TestPodEnterSurfacesPortForwardError(t *testing.T) {
 	}
 }
 
+func TestRunOptionsWiringEndpointBypass(t *testing.T) {
+	// Endpoint set → no Lister/PF needed; the function should not panic
+	// and should return promptly when the context is cancelled.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	opts := RunOptions{Endpoint: "http://127.0.0.1:1"}
+	// Run will exit because ctx is already cancelled; we just verify
+	// it doesn't dereference nil Lister/PortForwarder.
+	_ = Run(ctx, opts)
+}
+
 // silence unused-import nag if test build trims this file later
 var _ = time.Second

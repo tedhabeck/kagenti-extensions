@@ -610,15 +610,35 @@ func trim[T any](s []T, n int) []T {
 	return out
 }
 
-// Run opens the TUI. Blocks until the user quits or ctx is cancelled.
-// Convenience wrapper around tea.Program.Run for main.go.
-func Run(ctx context.Context, endpoint string) error {
-	c := apiclient.New(endpoint)
-	m := New(ctx, c).(*model)
+// RunOptions selects the entry mode for abctl's TUI.
+//
+// If Endpoint is non-empty, abctl skips the picker and connects directly
+// to that URL — preserving the pre-picker behavior (and the documented
+// `--endpoint` flag).
+//
+// Otherwise, abctl uses Lister + PortForwarder to render the picker.
+// Both must be non-nil in picker mode.
+type RunOptions struct {
+	Endpoint      string
+	Lister        cluster.Lister
+	PortForwarder cluster.PortForwarder
+}
+
+// Run starts the bubbletea program. See RunOptions for mode selection.
+func Run(ctx context.Context, opts RunOptions) error {
+	var m *model
+	if opts.Endpoint != "" {
+		c := apiclient.New(opts.Endpoint)
+		m = New(ctx, c).(*model)
+	} else {
+		m = newPickerModel(ctx, opts.Lister, opts.PortForwarder)
+	}
+	defer func() {
+		if m.activePF != nil {
+			_ = m.activePF.Close()
+		}
+	}()
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err := p.Run()
-	if m.activePF != nil {
-		_ = m.activePF.Close()
-	}
 	return err
 }
