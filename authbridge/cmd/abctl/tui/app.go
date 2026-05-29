@@ -728,7 +728,7 @@ func Run(ctx context.Context, opts RunOptions) error {
 			_ = m.activePF.Close()
 		}
 	}()
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx))
 	_, err := p.Run()
 	return err
 }
