@@ -119,6 +119,8 @@ func Build(entries []config.PluginEntry, opts ...pipeline.Option) (*pipeline.Pip
 			if err := c.Configure(e.Config); err != nil {
 				return nil, fmt.Errorf("configure %q: %w", e.Name, err)
 			}
+			// Wrap so the session API can surface the raw config on /v1/pipeline.
+			p = pipeline.WrapConfigured(p, e.Config)
 		} else if len(e.Config) > 0 {
 			return nil, fmt.Errorf("plugin %q does not accept configuration", e.Name)
 		}
@@ -167,6 +169,8 @@ func BuildWithSPIFFE(entries []config.PluginEntry, p *spiffe.Provider, opts ...p
 			if err := c.Configure(e.Config); err != nil {
 				return nil, fmt.Errorf("configure %q: %w", e.Name, err)
 			}
+			// Wrap so the session API can surface the raw config on /v1/pipeline.
+			plugin = pipeline.WrapConfigured(plugin, e.Config)
 		} else if len(e.Config) > 0 {
 			return nil, fmt.Errorf("plugin %q does not accept configuration", e.Name)
 		}

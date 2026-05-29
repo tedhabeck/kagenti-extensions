@@ -28,7 +28,7 @@ func (f *fakePlugin) OnResponse(ctx context.Context, pctx *Context) Action {
 
 func TestConfiguredPluginRawConfig(t *testing.T) {
 	raw := json.RawMessage(`{"issuer":"http://idp"}`)
-	cp := wrapConfigured(&fakePlugin{name: "jwt-validation"}, raw)
+	cp := WrapConfigured(&fakePlugin{name: "jwt-validation"}, raw)
 	rc, ok := cp.(interface{ RawConfig() json.RawMessage })
 	if !ok {
 		t.Fatal("wrapper should expose RawConfig() via type-assertion")
@@ -44,7 +44,7 @@ func TestConfiguredPluginPassesThroughPluginMethods(t *testing.T) {
 		name: "jwt-validation",
 		caps: PluginCapabilities{Reads: []string{"a"}, Writes: []string{"security"}},
 	}
-	cp := wrapConfigured(fake, json.RawMessage(`{}`))
+	cp := WrapConfigured(fake, json.RawMessage(`{}`))
 
 	if cp.Name() != "jwt-validation" {
 		t.Fatalf("Name pass-through broken: %q", cp.Name())
@@ -107,7 +107,7 @@ func (f *fakeReadier) Ready() bool { return f.ready }
 
 func TestConfiguredPluginForwardsInit(t *testing.T) {
 	fake := &fakeInitializer{fakePlugin: fakePlugin{name: "x"}}
-	cp := wrapConfigured(fake, nil)
+	cp := WrapConfigured(fake, nil)
 	init, ok := cp.(Initializer)
 	if !ok {
 		t.Fatal("wrapper should implement Initializer (unconditional forwarding)")
@@ -121,7 +121,7 @@ func TestConfiguredPluginForwardsInit(t *testing.T) {
 }
 
 func TestConfiguredPluginInitNoOpForNonInitializer(t *testing.T) {
-	cp := wrapConfigured(&fakePlugin{name: "x"}, nil)
+	cp := WrapConfigured(&fakePlugin{name: "x"}, nil)
 	init, ok := cp.(Initializer)
 	if !ok {
 		t.Fatal("wrapper always implements Initializer")
@@ -133,7 +133,7 @@ func TestConfiguredPluginInitNoOpForNonInitializer(t *testing.T) {
 
 func TestConfiguredPluginForwardsShutdown(t *testing.T) {
 	fake := &fakeShutdowner{fakePlugin: fakePlugin{name: "x"}}
-	cp := wrapConfigured(fake, nil)
+	cp := WrapConfigured(fake, nil)
 	sh, ok := cp.(Shutdowner)
 	if !ok {
 		t.Fatal("wrapper should implement Shutdowner")
@@ -147,7 +147,7 @@ func TestConfiguredPluginForwardsShutdown(t *testing.T) {
 }
 
 func TestConfiguredPluginShutdownNoOpForNonShutdowner(t *testing.T) {
-	cp := wrapConfigured(&fakePlugin{name: "x"}, nil)
+	cp := WrapConfigured(&fakePlugin{name: "x"}, nil)
 	sh, ok := cp.(Shutdowner)
 	if !ok {
 		t.Fatal("wrapper always implements Shutdowner")
@@ -159,7 +159,7 @@ func TestConfiguredPluginShutdownNoOpForNonShutdowner(t *testing.T) {
 
 func TestConfiguredPluginForwardsFinish(t *testing.T) {
 	fake := &fakeFinisher{fakePlugin: fakePlugin{name: "x"}}
-	cp := wrapConfigured(fake, nil)
+	cp := WrapConfigured(fake, nil)
 	fin, ok := cp.(Finisher)
 	if !ok {
 		t.Fatal("wrapper should implement Finisher")
@@ -171,7 +171,7 @@ func TestConfiguredPluginForwardsFinish(t *testing.T) {
 }
 
 func TestConfiguredPluginFinishNoOpForNonFinisher(t *testing.T) {
-	cp := wrapConfigured(&fakePlugin{name: "x"}, nil)
+	cp := WrapConfigured(&fakePlugin{name: "x"}, nil)
 	fin, ok := cp.(Finisher)
 	if !ok {
 		t.Fatal("wrapper always implements Finisher")
@@ -183,7 +183,7 @@ func TestConfiguredPluginFinishNoOpForNonFinisher(t *testing.T) {
 func TestConfiguredPluginForwardsReady(t *testing.T) {
 	// Plugin that reports not-ready: wrapper must report not-ready too.
 	fake := &fakeReadier{fakePlugin: fakePlugin{name: "x"}, ready: false}
-	cp := wrapConfigured(fake, nil)
+	cp := WrapConfigured(fake, nil)
 	r, ok := cp.(Readier)
 	if !ok {
 		t.Fatal("wrapper should implement Readier")
@@ -201,7 +201,7 @@ func TestConfiguredPluginForwardsReady(t *testing.T) {
 func TestConfiguredPluginReadyDefaultsTrueForNonReadier(t *testing.T) {
 	// Matches the existing Pipeline.Ready() semantics: plugins without
 	// Readier are considered always-ready (pipeline.go:287-289).
-	cp := wrapConfigured(&fakePlugin{name: "x"}, nil)
+	cp := WrapConfigured(&fakePlugin{name: "x"}, nil)
 	r, ok := cp.(Readier)
 	if !ok {
 		t.Fatal("wrapper always implements Readier")

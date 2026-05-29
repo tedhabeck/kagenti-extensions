@@ -20,10 +20,12 @@ type configuredPlugin struct {
 	raw json.RawMessage
 }
 
-// wrapConfigured returns a Plugin whose dynamic type is *configuredPlugin.
-// Callers (registry.Build) invoke this only after Configurable.Configure
-// returns nil; non-Configurable plugins pass through unwrapped.
-func wrapConfigured(p Plugin, raw json.RawMessage) Plugin {
+// WrapConfigured returns a Plugin whose dynamic type retains the raw
+// config bytes the plugin was built from, so the session API can
+// surface them on /v1/pipeline. Callers (plugins.Build) invoke this
+// only after Configurable.Configure returns nil; non-Configurable
+// plugins pass through unwrapped.
+func WrapConfigured(p Plugin, raw json.RawMessage) Plugin {
 	return &configuredPlugin{Plugin: p, raw: raw}
 }
 
