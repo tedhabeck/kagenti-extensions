@@ -149,9 +149,16 @@ func describePipeline(h *pipeline.Holder, direction string) []pipelinePluginView
 			Reads:      caps.Reads,
 		}
 		// Surface raw config when the plugin was wrapped by the registry.
-		// Non-Configurable plugins type-assert false; Config stays nil and
-		// json.Marshal omits it via omitempty.
-		if rc, ok := pl.(interface{ RawConfig() json.RawMessage }); ok {
+		// Non-Configurable plugins don't satisfy RawConfigProvider; Config
+		// stays nil and json.Marshal omits it via omitempty.
+		//
+		// Trust note: bytes are emitted verbatim. The framework convention
+		// is that secrets live behind *_file paths, never inline (mirrors
+		// the policy at :9093/config). This endpoint is in-cluster only;
+		// a regex-based redaction layer would be illusory given how many
+		// secret-like field names exist in practice. Enforce no-inline-
+		// secrets at config-review time instead.
+		if rc, ok := pl.(pipeline.RawConfigProvider); ok {
 			view.Config = rc.RawConfig()
 		}
 		out[i] = view

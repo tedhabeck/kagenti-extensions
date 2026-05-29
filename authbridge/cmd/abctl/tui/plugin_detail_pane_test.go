@@ -54,3 +54,36 @@ func TestShowPluginDetailRendersNoneForEmptyConfig(t *testing.T) {
 		t.Fatalf("rendered view should say (none) for empty Config:\n%s", view)
 	}
 }
+
+// TestShowPluginDetailHandlesMalformedConfig verifies the TUI degrades
+// gracefully when Config bytes are not valid JSON. The server should
+// never produce malformed bytes (Configure() validates), but corruption
+// in transit isn't impossible — we lock the contract that the renderer
+// writes *something* without panicking.
+func TestShowPluginDetailHandlesMalformedConfig(t *testing.T) {
+	m := newPickerModel(context.Background(), nil, nil)
+	m.detailVp.Width = 80
+	m.detailVp.Height = 20
+	plugin := &apiclient.PipelinePlugin{
+		Name:      "broken",
+		Direction: "inbound",
+		Position:  1,
+		Config:    json.RawMessage(`{not valid`),
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("showPluginDetail panicked on malformed JSON: %v", r)
+		}
+	}()
+	m.showPluginDetail(plugin)
+	view := m.detailVp.View()
+	if !strings.Contains(view, "Config:") {
+		t.Fatalf("rendered view missing Config section:\n%s", view)
+	}
+	// ColorizeJSONBytes' fallback is to render the raw bytes as a muted
+	// string. We don't assert exact escape-code output (style-dependent),
+	// but the literal "{not" should appear somewhere.
+	if !strings.Contains(view, "{not") {
+		t.Fatalf("rendered view missing raw config fallback:\n%s", view)
+	}
+}

@@ -29,7 +29,7 @@ func (f *fakePlugin) OnResponse(ctx context.Context, pctx *Context) Action {
 func TestConfiguredPluginRawConfig(t *testing.T) {
 	raw := json.RawMessage(`{"issuer":"http://idp"}`)
 	cp := WrapConfigured(&fakePlugin{name: "jwt-validation"}, raw)
-	rc, ok := cp.(interface{ RawConfig() json.RawMessage })
+	rc, ok := cp.(RawConfigProvider)
 	if !ok {
 		t.Fatal("wrapper should expose RawConfig() via type-assertion")
 	}

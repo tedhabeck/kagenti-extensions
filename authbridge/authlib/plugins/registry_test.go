@@ -518,7 +518,7 @@ func (c *cfgPlugin) Configure(raw json.RawMessage) error {
 
 // TestRegistryWrapsConfigurablePluginsForRawConfig verifies that plugins
 // built through Build expose their raw config bytes via type-assertion
-// to interface{ RawConfig() json.RawMessage }. This is the contract
+// to pipeline.RawConfigProvider. This is the contract
 // /v1/pipeline relies on.
 func TestRegistryWrapsConfigurablePluginsForRawConfig(t *testing.T) {
 	// Register a Configurable plugin and a non-Configurable plugin under
@@ -548,7 +548,7 @@ func TestRegistryWrapsConfigurablePluginsForRawConfig(t *testing.T) {
 	}
 
 	// First plugin (Configurable) should expose RawConfig().
-	rc, ok := plugins[0].(interface{ RawConfig() json.RawMessage })
+	rc, ok := plugins[0].(pipeline.RawConfigProvider)
 	if !ok {
 		t.Fatal("Configurable plugin should be wrapped (RawConfig type-assert)")
 	}
@@ -561,7 +561,7 @@ func TestRegistryWrapsConfigurablePluginsForRawConfig(t *testing.T) {
 	}
 
 	// Second plugin (non-Configurable) must NOT be wrapped.
-	_, ok = plugins[1].(interface{ RawConfig() json.RawMessage })
+	_, ok = plugins[1].(pipeline.RawConfigProvider)
 	if ok {
 		t.Fatal("non-Configurable plugin should NOT be wrapped")
 	}
@@ -598,7 +598,7 @@ func TestBuildWithSPIFFEWrapsConfigurablePluginsForRawConfig(t *testing.T) {
 		t.Fatalf("want 2 plugins, got %d", len(plugins))
 	}
 
-	rc, ok := plugins[0].(interface{ RawConfig() json.RawMessage })
+	rc, ok := plugins[0].(pipeline.RawConfigProvider)
 	if !ok {
 		t.Fatal("Configurable plugin should be wrapped (RawConfig type-assert)")
 	}
@@ -608,7 +608,7 @@ func TestBuildWithSPIFFEWrapsConfigurablePluginsForRawConfig(t *testing.T) {
 	if plugins[0].Name() != cfgName {
 		t.Fatalf("Name through wrapper: %q", plugins[0].Name())
 	}
-	_, ok = plugins[1].(interface{ RawConfig() json.RawMessage })
+	_, ok = plugins[1].(pipeline.RawConfigProvider)
 	if ok {
 		t.Fatal("non-Configurable plugin should NOT be wrapped")
 	}

@@ -31,11 +31,15 @@ func (m *model) showPluginDetail(p *apiclient.PipelinePlugin) {
 	fmt.Fprintf(&b, "%s %s\n", styleMuted.Render("Body:     "), body)
 	fmt.Fprintf(&b, "%s %d events in cached sessions\n", styleMuted.Render("Activity: "), counts[p.Name])
 	fmt.Fprintln(&b)
-	b.WriteString(styleMuted.Render("Config:    "))
+	// Always-newline format keeps the visual layout consistent whether
+	// the plugin is Configurable (JSON body, multi-line) or not ("(none)",
+	// single line). Earlier inline-(none) variant caused jitter when
+	// navigating between plugins with and without config.
+	b.WriteString(styleMuted.Render("Config:"))
+	b.WriteString("\n")
 	if len(p.Config) == 0 {
-		b.WriteString(" (none)\n")
+		b.WriteString("  (none)\n")
 	} else {
-		b.WriteString("\n")
 		b.WriteString(ColorizeJSONBytes(p.Config))
 		b.WriteString("\n")
 	}
