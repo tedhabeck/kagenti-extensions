@@ -9,6 +9,7 @@
 package edit
 
 import (
+	"bytes"
 	"fmt"
 
 	"gopkg.in/yaml.v3"
@@ -78,4 +79,74 @@ func FindPipelineRange(innerYAML []byte) (start, end int, err error) {
 		end = lineStarts[nextKeyLine-1]
 	}
 	return start, end, nil
+}
+
+// Splice replaces the byte range [start, end) of innerYAML with newSubtree
+// and returns the result. Used to apply the user's edit to just the pipeline
+// subtree, leaving everything outside it byte-for-byte unchanged. Comments,
+// blank lines, and field ordering outside the pipeline subtree all survive.
+func Splice(innerYAML []byte, start, end int, newSubtree []byte) []byte {
+	var b bytes.Buffer
+	b.Grow(len(innerYAML) - (end - start) + len(newSubtree))
+	b.Write(innerYAML[:start])
+	b.Write(newSubtree)
+	b.Write(innerYAML[end:])
+	return b.Bytes()
+}
+
+// BuildManifest takes the original ConfigMap YAML manifest (as returned by
+// kubectl get cm -o yaml) and a new inner runtime YAML (the contents that
+// belong in data.config.yaml). Returns a manifest ready for kubectl apply.
+//
+// The manifest passes through yaml.v3 so the outer structure (apiVersion,
+// kind, metadata, etc.) is preserved. Only data.config.yaml is replaced.
+// Comments inside the inner runtime YAML survive because we set the
+// data.config.yaml value to a literal block (|) string carrying newInner
+// verbatim.
+func BuildManifest(origCMYAML, newInner []byte) ([]byte, error) {
+	var root yaml.Node
+	if err := yaml.Unmarshal(origCMYAML, &root); err != nil {
+		return nil, fmt.Errorf("parse ConfigMap manifest: %w", err)
+	}
+	if root.Kind != yaml.DocumentNode || len(root.Content) == 0 {
+		return nil, fmt.Errorf("ConfigMap manifest is not a document")
+	}
+	doc := root.Content[0]
+	if doc.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("ConfigMap manifest root is not a mapping")
+	}
+
+	// Find data → config.yaml.
+	var dataNode *yaml.Node
+	for i := 0; i < len(doc.Content); i += 2 {
+		if doc.Content[i].Value == "data" {
+			dataNode = doc.Content[i+1]
+			break
+		}
+	}
+	if dataNode == nil || dataNode.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("ConfigMap has no data: mapping")
+	}
+	var configValueNode *yaml.Node
+	for i := 0; i < len(dataNode.Content); i += 2 {
+		if dataNode.Content[i].Value == "config.yaml" {
+			configValueNode = dataNode.Content[i+1]
+			break
+		}
+	}
+	if configValueNode == nil {
+		return nil, fmt.Errorf("ConfigMap data has no config.yaml key")
+	}
+
+	// Set the value to a literal-block scalar carrying newInner.
+	configValueNode.Kind = yaml.ScalarNode
+	configValueNode.Tag = "!!str"
+	configValueNode.Style = yaml.LiteralStyle
+	configValueNode.Value = string(newInner)
+
+	out, err := yaml.Marshal(&root)
+	if err != nil {
+		return nil, fmt.Errorf("emit ConfigMap manifest: %w", err)
+	}
+	return out, nil
 }
