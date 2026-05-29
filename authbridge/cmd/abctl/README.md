@@ -110,7 +110,6 @@ results; treat the output accordingly.
 ## Deferred to later PRs
 
 - Native clipboard (currently writes to `/tmp`).
-- In-process `kubectl port-forward` (currently manual).
 - Fuzzy search beyond substring match.
 - Per-user filtering (`Identity.Subject == X`).
 - Krew plugin packaging.
