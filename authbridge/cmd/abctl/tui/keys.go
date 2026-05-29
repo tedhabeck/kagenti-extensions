@@ -151,15 +151,15 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			// Return to whichever pane invoked the detail (Pipeline or Catalog).
 			if m.previousPane == paneCatalog {
 				m.pane = paneCatalog
-				m.previousPane = 0
+				m.previousPane = paneNone
 			} else {
 				m.pane = panePipeline
 			}
 		case paneCatalog:
 			// Return to whichever pane the user pressed P from.
-			if m.previousPane != 0 {
+			if m.previousPane != paneNone {
 				m.pane = m.previousPane
-				m.previousPane = 0
+				m.previousPane = paneNone
 			} else {
 				m.pane = panePipeline
 			}

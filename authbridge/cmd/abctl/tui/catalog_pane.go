@@ -68,7 +68,7 @@ func (m *model) selectedCatalogEntry() *apiclient.PipelinePlugin {
 		if e.Name == name {
 			p := apiclient.PipelinePlugin{
 				Name:        e.Name,
-				BodyAccess:  e.BodyAccess,
+				BodyAccess:  e.ReadsBody,
 				Writes:      e.Writes,
 				Reads:       e.Reads,
 				Requires:    e.Requires,

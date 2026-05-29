@@ -61,19 +61,20 @@ func newPickerModel(ctx context.Context, lister cluster.Lister, pf cluster.PortF
 
 	return &model{
 		// endpoint and client are set later, when portForwardReadyMsg arrives.
-		parentCtx:   parentCtx,
-		ctx:         ctx,
-		cancel:      cancel,
-		events:      make(map[string][]pipeline.SessionEvent),
-		pane:        paneNamespaces,
-		sessionsTbl: newSessionsTable(),
-		eventsTbl:   newEventsTable(),
-		pipelineTbl: newPipelineTable(),
-		catalogTbl:  newCatalogTable(),
-		detailVp:    viewport.New(0, 0),
-		filterInput: ti,
-		lastTick:    time.Now(),
-		connState:   connStateInfo{phase: connConnecting},
+		parentCtx:    parentCtx,
+		ctx:          ctx,
+		cancel:       cancel,
+		events:       make(map[string][]pipeline.SessionEvent),
+		pane:         paneNamespaces,
+		sessionsTbl:  newSessionsTable(),
+		eventsTbl:    newEventsTable(),
+		pipelineTbl:  newPipelineTable(),
+		catalogTbl:   newCatalogTable(),
+		previousPane: paneNone,
+		detailVp:     viewport.New(0, 0),
+		filterInput:  ti,
+		lastTick:     time.Now(),
+		connState:    connStateInfo{phase: connConnecting},
 
 		// Picker-only:
 		lister:        lister,

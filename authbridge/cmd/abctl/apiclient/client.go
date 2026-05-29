@@ -114,10 +114,14 @@ type PluginCatalog struct {
 // PluginCatalogEntry mirrors the server's sessionapi.CatalogEntry.
 // Describes a registered plugin's static type-level metadata; the
 // catalog includes plugins not currently in the active pipeline.
+//
+// readsBody is the modern field name (matches pipeline.PluginCapabilities
+// post-Normalize); the older bodyAccess alias is intentionally NOT
+// emitted on this new wire shape.
 type PluginCatalogEntry struct {
 	Name        string   `json:"name"`
 	Direction   string   `json:"direction,omitempty"`
-	BodyAccess  bool     `json:"bodyAccess,omitempty"`
+	ReadsBody   bool     `json:"readsBody,omitempty"`
 	Writes      []string `json:"writes,omitempty"`
 	Reads       []string `json:"reads,omitempty"`
 	Requires    []string `json:"requires,omitempty"`

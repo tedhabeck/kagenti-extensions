@@ -46,10 +46,15 @@ type Server struct {
 // CatalogEntry is the wire shape for one plugin in /v1/plugins. Mirrors
 // pipelinePluginView's metadata fields so abctl can use the same
 // rendering paths for the active pipeline and the catalog browser.
+//
+// Uses readsBody (the modern field name) instead of pipelinePluginView's
+// legacy bodyAccess: this is a new wire shape introduced in the same PR
+// that documents bodyAccess as deprecated, so there's no compat cost to
+// emit the right name from day one.
 type CatalogEntry struct {
 	Name        string   `json:"name"`
 	Direction   string   `json:"direction,omitempty"`
-	BodyAccess  bool     `json:"bodyAccess,omitempty"`
+	ReadsBody   bool     `json:"readsBody,omitempty"`
 	Writes      []string `json:"writes,omitempty"`
 	Reads       []string `json:"reads,omitempty"`
 	Requires    []string `json:"requires,omitempty"`

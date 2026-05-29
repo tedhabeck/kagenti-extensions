@@ -162,15 +162,19 @@ func validateChain(direction string, chain pipelineChain, byName map[string]apic
 			}
 		}
 
-		// After: present-at-higher-position is a misorder.
+		// After: present-at-or-after-this-position is a misorder. Matches
+		// the framework's validateRelationships rule (j >= i, not j > i)
+		// so a plugin listing itself in After or having a duplicate at
+		// the same index is flagged identically by abctl and the
+		// framework.
 		for _, name := range entry.After {
 			rp, present := positions[name]
-			if present && rp > pos {
+			if present && rp >= pos {
 				errs = append(errs, ValidationError{
 					Direction:  direction,
 					PluginName: p.Name,
 					Position:   pos,
-					Message: fmt.Sprintf("After %q expects it earlier; it's at position %d (> %d)",
+					Message: fmt.Sprintf("After %q expects it earlier; it's at position %d (must be < %d)",
 						name, rp, pos),
 				})
 			}

@@ -89,15 +89,52 @@ type CatalogEntry struct {
 	Capabilities pipeline.PluginCapabilities
 }
 
-// Catalog returns a sorted snapshot of every registered plugin's
-// capabilities. Each factory is called once with no config; the
-// resulting instance's Capabilities() is the static type-level
-// metadata that the rest of the framework also reads.
+// catalogCache memoizes the Catalog() result on first call. Constructors
+// run once at first invocation; the throwaway instance is unreferenced
+// after Capabilities() is read but never explicitly torn down.
 //
-// Constructors must therefore be cheap (allocate the struct, nothing
-// more) — heavy work belongs in Init() after Configure() has run. The
-// godoc on PluginCapabilities documents this constraint.
+// Caching bounds the constructor side-effect surface to a one-shot per
+// process — even a misbehaving plugin that allocates a goroutine in its
+// constructor leaks one goroutine, not one per /v1/plugins request.
+var (
+	catalogCacheMu  sync.RWMutex
+	catalogCacheVal []CatalogEntry
+)
+
+// Catalog returns a sorted snapshot of every registered plugin's
+// capabilities. The result is computed on first call and cached;
+// subsequent calls return the cached slice (do not mutate it).
+//
+// First-call mechanics: each registered factory is invoked once with no
+// config; the resulting instance's Capabilities() is the static
+// type-level metadata that the rest of the framework also reads.
+//
+// CONSTRUCTOR CONTRACT: factories called from Catalog MUST NOT allocate
+// goroutines, network connections, file handles, or other resources
+// that need explicit teardown. Allocate the plugin struct and nothing
+// more — heavy work belongs in Init() (after Configure()), where the
+// framework owns the lifecycle. The throwaway instance Catalog
+// constructs is never Shutdown'd; anything it leaks is process-wide.
+//
+// The godoc on PluginCapabilities documents the parallel constraint
+// that Capabilities() must be instance-state-independent (so the
+// cached snapshot from one instance describes every instance the
+// factory produces).
 func Catalog() []CatalogEntry {
+	catalogCacheMu.RLock()
+	if catalogCacheVal != nil {
+		out := catalogCacheVal
+		catalogCacheMu.RUnlock()
+		return out
+	}
+	catalogCacheMu.RUnlock()
+
+	catalogCacheMu.Lock()
+	defer catalogCacheMu.Unlock()
+	if catalogCacheVal != nil { // double-check under write lock
+		return catalogCacheVal
+	}
+
 	registryMu.RLock()
 	defer registryMu.RUnlock()
 	out := make([]CatalogEntry, 0, len(registry))
@@ -108,7 +145,16 @@ func Catalog() []CatalogEntry {
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	catalogCacheVal = out
 	return out
+}
+
+// resetCatalogCache clears the memoized Catalog result. Intended for
+// tests that register/unregister plugins and need a fresh view.
+func resetCatalogCache() {
+	catalogCacheMu.Lock()
+	catalogCacheVal = nil
+	catalogCacheMu.Unlock()
 }
 
 // factoryFor looks up a factory by name. Internal to the package.

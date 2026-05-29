@@ -39,6 +39,12 @@ const (
 	paneCatalog
 )
 
+// paneNone is the explicit "no previous pane recorded" sentinel for
+// model.previousPane. Using paneNamespaces (the zero value) as a
+// sentinel would conflict with a future feature that wanted to open
+// the catalog from the picker. -1 is unambiguous.
+const paneNone paneID = -1
+
 // Connection state for the SSE stream.
 type connPhase int
 
@@ -283,20 +289,21 @@ func New(ctx context.Context, c *apiclient.Client) tea.Model {
 	ti.Prompt = "/ "
 
 	return &model{
-		endpoint:    c.Endpoint(),
-		client:      c,
-		ctx:         ctx,
-		cancel:      cancel,
-		events:      make(map[string][]pipeline.SessionEvent),
-		pane:        paneSessions,
-		sessionsTbl: newSessionsTable(),
-		eventsTbl:   newEventsTable(),
-		pipelineTbl: newPipelineTable(),
-		catalogTbl:  newCatalogTable(),
-		detailVp:    viewport.New(0, 0),
-		filterInput: ti,
-		lastTick:    time.Now(),
-		connState:   connStateInfo{phase: connConnecting},
+		endpoint:     c.Endpoint(),
+		client:       c,
+		ctx:          ctx,
+		cancel:       cancel,
+		events:       make(map[string][]pipeline.SessionEvent),
+		pane:         paneSessions,
+		sessionsTbl:  newSessionsTable(),
+		eventsTbl:    newEventsTable(),
+		pipelineTbl:  newPipelineTable(),
+		catalogTbl:   newCatalogTable(),
+		previousPane: paneNone,
+		detailVp:     viewport.New(0, 0),
+		filterInput:  ti,
+		lastTick:     time.Now(),
+		connState:    connStateInfo{phase: connConnecting},
 	}
 }
 

@@ -3,6 +3,7 @@ package plugins
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/config"
@@ -620,6 +621,8 @@ func TestBuildWithSPIFFEWrapsConfigurablePluginsForRawConfig(t *testing.T) {
 // registry, calls each factory once, and returns sorted CatalogEntries
 // carrying the static capabilities each plugin advertises.
 func TestCatalog_IncludesRegisteredPlugins(t *testing.T) {
+	resetCatalogCache()
+	t.Cleanup(resetCatalogCache)
 	const a, b = "test-catalog-a", "test-catalog-b"
 	RegisterPlugin(a, func() pipeline.Plugin {
 		return &relPlugin{
@@ -672,5 +675,40 @@ func TestCatalog_IncludesRegisteredPlugins(t *testing.T) {
 	}
 	if idxA == -1 || idxB == -1 || idxA > idxB {
 		t.Fatalf("Catalog not sorted: a@%d b@%d", idxA, idxB)
+	}
+}
+
+// TestCatalog_FactoryInvariant locks the load-bearing claim that every
+// plugin's factory produces instances with byte-identical Capabilities().
+// Catalog() reads metadata once (from the first instance) and caches the
+// result, so a future plugin that varies Capabilities() based on instance
+// state would silently produce wrong catalog entries.
+//
+// Walks every registered plugin, calls its factory twice, and asserts the
+// two Capabilities() return values are equal. Failure points to a plugin
+// that needs to either (a) make its Capabilities() purely static, or
+// (b) split into multiple registered names per behavioral variant.
+func TestCatalog_FactoryInvariant(t *testing.T) {
+	registryMu.RLock()
+	names := make([]string, 0, len(registry))
+	for n := range registry {
+		names = append(names, n)
+	}
+	registryMu.RUnlock()
+
+	for _, name := range names {
+		name := name
+		t.Run(name, func(t *testing.T) {
+			factory, ok := factoryFor(name)
+			if !ok {
+				t.Fatalf("factory missing")
+			}
+			capsA := factory().Capabilities().Normalize()
+			capsB := factory().Capabilities().Normalize()
+			if !reflect.DeepEqual(capsA, capsB) {
+				t.Fatalf("Capabilities() differs across factory instances:\n  A: %+v\n  B: %+v",
+					capsA, capsB)
+			}
+		})
 	}
 }
