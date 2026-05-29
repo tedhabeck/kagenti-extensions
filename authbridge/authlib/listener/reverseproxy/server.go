@@ -230,13 +230,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	// not A2A-only. A non-A2A inbound, or an A2A request that fails to
 	// parse, is intentionally not recorded here.
 	if s.Sessions != nil && pctx.Extensions.A2A != nil {
-		sid := pctx.Extensions.A2A.SessionID
-		if sid == "" {
-			sid = s.Sessions.ActiveSession()
-		}
-		if sid == "" {
-			sid = session.DefaultSessionID
-		}
+		sid := inboundSessionID(pctx)
 		// Snapshot-copy the protocol extension and use the shared helpers
 		// for plugin invocations / observability / identity. Mirrors what
 		// extproc does so request events don't pick up response-phase
@@ -320,13 +314,7 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 	// pipeline saw at this point (may be empty for streamed bodies),
 	// but the status code and plugin invocations are always meaningful.
 	if s.Sessions != nil && pctx.Extensions.A2A != nil {
-		sid := pctx.Extensions.A2A.SessionID
-		if sid == "" {
-			sid = s.Sessions.ActiveSession()
-		}
-		if sid == "" {
-			sid = session.DefaultSessionID
-		}
+		sid := inboundSessionID(pctx)
 		s.Sessions.Append(sid, pipeline.SessionEvent{
 			At:          time.Now(),
 			Direction:   pipeline.Inbound,
@@ -367,18 +355,10 @@ func (s *Server) recordInboundReject(pctx *pipeline.Context, action pipeline.Act
 		return
 	}
 	// Inbound uses the A2A-stated contextId when available; otherwise
-	// falls through to the default bucket. Matches the accept path's
-	// bucketing rule (A2A request event at line 112-125).
-	sid := ""
-	if pctx.Extensions.A2A != nil {
-		sid = pctx.Extensions.A2A.SessionID
-	}
-	if sid == "" {
-		sid = s.Sessions.ActiveSession()
-	}
-	if sid == "" {
-		sid = session.DefaultSessionID
-	}
+	// the default bucket. Same rule as the accept path's
+	// inboundSessionID helper, kept consistent so denial events land
+	// in the same bucket the accepted request would have.
+	sid := inboundSessionID(pctx)
 	var status int
 	var code, message string
 	if action.Violation != nil {
@@ -429,4 +409,20 @@ func requestScheme(r *http.Request) string {
 		return "https"
 	}
 	return "http"
+}
+
+// inboundSessionID returns the bucket ID for an inbound event. Mirrors
+// extproc's inboundSessionID: trusts the A2A-stated contextId when
+// non-empty, otherwise routes to DefaultSessionID. Does NOT fall back
+// to ActiveSession() — that fallback was a cross-conversation
+// contamination vector (a new conversation's first turn would inherit
+// the previous conversation's rekeyed bucket, stranding the current
+// turn's events in the prior bucket and creating an orphan one-event
+// session for the response). Rekey on response migrates the Default
+// bucket into the contextId once the agent reveals it.
+func inboundSessionID(pctx *pipeline.Context) string {
+	if pctx.Extensions.A2A != nil && pctx.Extensions.A2A.SessionID != "" {
+		return pctx.Extensions.A2A.SessionID
+	}
+	return session.DefaultSessionID
 }
