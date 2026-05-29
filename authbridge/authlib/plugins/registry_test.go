@@ -566,3 +566,50 @@ func TestRegistryWrapsConfigurablePluginsForRawConfig(t *testing.T) {
 		t.Fatal("non-Configurable plugin should NOT be wrapped")
 	}
 }
+
+// TestBuildWithSPIFFEWrapsConfigurablePluginsForRawConfig is the parity test
+// for BuildWithSPIFFE — the second registry entry point shares the wrap site
+// with Build. Lock both paths so the wrapping invariant doesn't drift.
+func TestBuildWithSPIFFEWrapsConfigurablePluginsForRawConfig(t *testing.T) {
+	cfgName := "rawcfg-spiffe-test-configurable"
+	relName := "rawcfg-spiffe-test-relational"
+	RegisterPlugin(cfgName, func() pipeline.Plugin {
+		return &cfgPlugin{relPlugin: relPlugin{name: cfgName}}
+	})
+	defer UnregisterPlugin(cfgName)
+	RegisterPlugin(relName, func() pipeline.Plugin {
+		return &relPlugin{name: relName}
+	})
+	defer UnregisterPlugin(relName)
+
+	configRaw := json.RawMessage(`{"hello":"world"}`)
+	// nil provider is valid for plugins that don't implement
+	// spiffe.ProviderConsumer (BuildWithSPIFFE skips SetSPIFFEProvider in
+	// that case).
+	pipe, err := BuildWithSPIFFE([]config.PluginEntry{
+		{Name: cfgName, Config: configRaw},
+		{Name: relName},
+	}, nil)
+	if err != nil {
+		t.Fatalf("BuildWithSPIFFE: %v", err)
+	}
+	plugins := pipe.Plugins()
+	if len(plugins) != 2 {
+		t.Fatalf("want 2 plugins, got %d", len(plugins))
+	}
+
+	rc, ok := plugins[0].(interface{ RawConfig() json.RawMessage })
+	if !ok {
+		t.Fatal("Configurable plugin should be wrapped (RawConfig type-assert)")
+	}
+	if string(rc.RawConfig()) != `{"hello":"world"}` {
+		t.Fatalf("RawConfig: got %q want %q", string(rc.RawConfig()), `{"hello":"world"}`)
+	}
+	if plugins[0].Name() != cfgName {
+		t.Fatalf("Name through wrapper: %q", plugins[0].Name())
+	}
+	_, ok = plugins[1].(interface{ RawConfig() json.RawMessage })
+	if ok {
+		t.Fatal("non-Configurable plugin should NOT be wrapped")
+	}
+}

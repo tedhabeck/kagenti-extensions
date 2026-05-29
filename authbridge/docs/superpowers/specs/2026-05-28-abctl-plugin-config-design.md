@@ -53,7 +53,7 @@ ConfigMap, because:
 
 ## Architecture
 
-```
+```text
 runtime YAML
     │
     ▼  (already exists)

@@ -120,7 +120,7 @@ func TestConfiguredPluginPassesThroughPluginMethods(t *testing.T) {
 
 Run:
 ```bash
-cd /Users/haihuang/works/go/src/github.com/kagenti/kagenti-extensions/authbridge
+cd authbridge
 go test ./authlib/pipeline/ -run TestConfiguredPlugin -v
 ```
 Expected: build failure — `wrapConfigured` undefined.
@@ -171,7 +171,7 @@ Note: the `context` import isn't used yet — Go will reject unused imports. Dro
 
 Run:
 ```bash
-cd /Users/haihuang/works/go/src/github.com/kagenti/kagenti-extensions/authbridge
+cd authbridge
 go test ./authlib/pipeline/ -run TestConfiguredPlugin -v
 go vet ./authlib/pipeline/
 ```
@@ -180,7 +180,7 @@ Expected: both tests PASS, vet clean.
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/haihuang/works/go/src/github.com/kagenti/kagenti-extensions
+# (run from repo root)
 git add authbridge/authlib/pipeline/configured.go authbridge/authlib/pipeline/configured_test.go
 git commit -s -m "feat(authlib): Add configuredPlugin wrapper retaining raw config
 
@@ -360,7 +360,7 @@ func TestConfiguredPluginReadyDefaultsTrueForNonReadier(t *testing.T) {
 
 Run:
 ```bash
-cd /Users/haihuang/works/go/src/github.com/kagenti/kagenti-extensions/authbridge
+cd authbridge
 go test ./authlib/pipeline/ -run TestConfiguredPlugin -v
 ```
 Expected: existing two tests still PASS, eight new tests FAIL with "wrapper should implement X" errors.
@@ -425,7 +425,7 @@ import (
 
 Run:
 ```bash
-cd /Users/haihuang/works/go/src/github.com/kagenti/kagenti-extensions/authbridge
+cd authbridge
 go test ./authlib/pipeline/ -run TestConfiguredPlugin -v
 go vet ./authlib/pipeline/
 ```
@@ -440,7 +440,7 @@ Expected: all tests PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/haihuang/works/go/src/github.com/kagenti/kagenti-extensions
+# (run from repo root)
 git add authbridge/authlib/pipeline/configured.go authbridge/authlib/pipeline/configured_test.go
 git commit -s -m "feat(authlib): Forward optional plugin interfaces in configuredPlugin
 
@@ -549,7 +549,7 @@ If `encoding/json` isn't yet imported in `registry_test.go`, add it. The other i
 
 Run:
 ```bash
-cd /Users/haihuang/works/go/src/github.com/kagenti/kagenti-extensions/authbridge
+cd authbridge
 go test ./authlib/plugins/ -run TestRegistryWrapsConfigurablePluginsForRawConfig -v
 ```
 Expected: FAIL — the test asserts `RawConfig` type-assertion succeeds for the Configurable plugin, but Build doesn't wrap yet, so the assertion fails on the first plugin.
@@ -581,8 +581,8 @@ In `authbridge/authlib/pipeline/configured_test.go`, find/replace every `wrapCon
 
 ```bash
 sed -i.bak 's/wrapConfigured(/WrapConfigured(/g' \
-  /Users/haihuang/works/go/src/github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline/configured_test.go
-rm /Users/haihuang/works/go/src/github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline/configured_test.go.bak
+  authbridge/authlib/pipeline/configured_test.go
+rm authbridge/authlib/pipeline/configured_test.go.bak
 ```
 
 - [ ] **Step 4: Implement — wrap in Build and BuildWithSPIFFE**
@@ -649,7 +649,7 @@ Becomes:
 
 Run:
 ```bash
-cd /Users/haihuang/works/go/src/github.com/kagenti/kagenti-extensions/authbridge
+cd authbridge
 go test ./authlib/...
 go vet ./authlib/...
 ```
@@ -662,7 +662,7 @@ If the new test fails because the non-Configurable plugin's type-assert succeeds
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/haihuang/works/go/src/github.com/kagenti/kagenti-extensions
+# (run from repo root)
 git add authbridge/authlib/pipeline/configured.go authbridge/authlib/pipeline/configured_test.go authbridge/authlib/plugins/registry.go authbridge/authlib/plugins/registry_test.go
 git commit -s -m "feat(authlib): Wrap Configurable plugins in the registry
 
@@ -759,7 +759,7 @@ func TestHandlePipelineSurfacesConfig(t *testing.T) {
 
 Run:
 ```bash
-cd /Users/haihuang/works/go/src/github.com/kagenti/kagenti-extensions/authbridge
+cd authbridge
 go test ./authlib/sessionapi/ -run TestHandlePipelineSurfacesConfig -v
 ```
 Expected: FAIL — the response body has no `config` field, so the assertion `string(p.Config) != ""` fires for the Configurable plugin.
@@ -815,7 +815,7 @@ func describePipeline(h *pipeline.Holder, direction string) []pipelinePluginView
 
 Run:
 ```bash
-cd /Users/haihuang/works/go/src/github.com/kagenti/kagenti-extensions/authbridge
+cd authbridge
 go test ./authlib/sessionapi/ -v
 go vet ./authlib/sessionapi/
 ```
@@ -824,7 +824,7 @@ Expected: all tests PASS including `TestHandlePipelineSurfacesConfig` and the ex
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/haihuang/works/go/src/github.com/kagenti/kagenti-extensions
+# (run from repo root)
 git add authbridge/authlib/sessionapi/server.go authbridge/authlib/sessionapi/server_test.go
 git commit -s -m "feat(sessionapi): Surface plugin runtime config on /v1/pipeline
 
@@ -897,7 +897,7 @@ func TestPipelinePluginDecodesConfig(t *testing.T) {
 
 Run:
 ```bash
-cd /Users/haihuang/works/go/src/github.com/kagenti/kagenti-extensions/authbridge/cmd/abctl
+cd authbridge/cmd/abctl
 go test ./apiclient/ -run TestPipelinePluginDecodesConfig -v
 ```
 Expected: build failure — `view.Inbound[0].Config` is undefined on `PipelinePlugin`.
@@ -924,7 +924,7 @@ If `encoding/json` isn't imported in `client.go` yet (it likely is, but verify),
 
 Run:
 ```bash
-cd /Users/haihuang/works/go/src/github.com/kagenti/kagenti-extensions/authbridge/cmd/abctl
+cd authbridge/cmd/abctl
 go test ./apiclient/ -v
 go vet ./apiclient/
 ```
@@ -933,7 +933,7 @@ Expected: all tests PASS including the new one, vet clean.
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/haihuang/works/go/src/github.com/kagenti/kagenti-extensions
+# (run from repo root)
 git add authbridge/cmd/abctl/apiclient/client.go authbridge/cmd/abctl/apiclient/client_test.go
 git commit -s -m "feat(abctl): Decode Config field on PipelinePlugin
 
@@ -957,7 +957,7 @@ Replace the placeholder text in `plugin_detail_pane.go` with `ColorizeJSONBytes`
 
 Run:
 ```bash
-grep -l "showPluginDetail" /Users/haihuang/works/go/src/github.com/kagenti/kagenti-extensions/authbridge/cmd/abctl/tui/*_test.go
+grep -l "showPluginDetail" authbridge/cmd/abctl/tui/*_test.go
 ```
 
 There may not be a dedicated test for `showPluginDetail` yet — `detail_pane_test.go` is the closest neighbor. If neither tests `showPluginDetail`, create `plugin_detail_pane_test.go`. The plan below assumes a new test file.
@@ -1030,7 +1030,7 @@ Add `"context"` to the imports if not already present.
 
 Run:
 ```bash
-cd /Users/haihuang/works/go/src/github.com/kagenti/kagenti-extensions/authbridge/cmd/abctl
+cd authbridge/cmd/abctl
 go test ./tui/ -run TestShowPluginDetail -v
 ```
 Expected: tests FAIL — current `showPluginDetail` renders the placeholder text "(per-plugin runtime config will be added when..." instead of "Config: ...".
@@ -1064,7 +1064,7 @@ if len(p.Config) == 0 {
 
 Run:
 ```bash
-cd /Users/haihuang/works/go/src/github.com/kagenti/kagenti-extensions/authbridge/cmd/abctl
+cd authbridge/cmd/abctl
 go test ./tui/
 go vet ./tui/
 go build ./...
@@ -1085,7 +1085,7 @@ go build -o ./abctl .
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/haihuang/works/go/src/github.com/kagenti/kagenti-extensions
+# (run from repo root)
 git add authbridge/cmd/abctl/tui/plugin_detail_pane.go authbridge/cmd/abctl/tui/plugin_detail_pane_test.go
 git commit -s -m "feat(abctl): Render plugin runtime config in plugin-detail pane
 
