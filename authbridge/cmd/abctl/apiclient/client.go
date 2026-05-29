@@ -83,12 +83,13 @@ type PipelineView struct {
 // PipelinePlugin describes one plugin's position, direction, and
 // capabilities. Mirrors the server's pipelinePluginView exactly.
 type PipelinePlugin struct {
-	Name       string   `json:"name"`
-	Direction  string   `json:"direction"`
-	Position   int      `json:"position"`
-	BodyAccess bool     `json:"bodyAccess"`
-	Writes     []string `json:"writes"`
-	Reads      []string `json:"reads"`
+	Name       string          `json:"name"`
+	Direction  string          `json:"direction"`
+	Position   int             `json:"position"`
+	BodyAccess bool            `json:"bodyAccess"`
+	Writes     []string        `json:"writes"`
+	Reads      []string        `json:"reads"`
+	Config     json.RawMessage `json:"config,omitempty"`
 }
 
 // GetPipeline fetches /v1/pipeline.

@@ -107,3 +107,42 @@ func TestGetPipeline(t *testing.T) {
 		t.Errorf("inbound[1].Writes = %v, want [a2a]", got.Inbound[1].Writes)
 	}
 }
+
+// TestPipelinePluginDecodesConfig verifies the new Config field on
+// /v1/pipeline survives JSON round-trip through PipelinePlugin.
+func TestPipelinePluginDecodesConfig(t *testing.T) {
+	body := `{"inbound":[
+	  {"name":"with-config","direction":"inbound","position":1,"bodyAccess":false,
+	   "config":{"hello":"world"}},
+	  {"name":"without-config","direction":"inbound","position":2,"bodyAccess":false}
+	],"outbound":[]}`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/pipeline" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	view, err := c.GetPipeline(context.Background())
+	if err != nil {
+		t.Fatalf("GetPipeline: %v", err)
+	}
+	if len(view.Inbound) != 2 {
+		t.Fatalf("want 2 inbound, got %d", len(view.Inbound))
+	}
+	// First plugin: Config decoded.
+	if string(view.Inbound[0].Config) != `{"hello":"world"}` {
+		t.Fatalf("with-config Config: got %q want %q",
+			string(view.Inbound[0].Config), `{"hello":"world"}`)
+	}
+	// Second plugin: Config absent → empty/nil.
+	if len(view.Inbound[1].Config) != 0 {
+		t.Fatalf("without-config Config should be empty, got %q",
+			string(view.Inbound[1].Config))
+	}
+}
