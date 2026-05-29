@@ -89,13 +89,20 @@ type PolledMsg struct {
 	Result PollResult
 }
 
+// pollDeadline bounds how long PollCmd waits for an in-pod reload to
+// reach a terminal state. Picked to outlast the worst-case kubelet
+// ConfigMap sync (~60s) plus the framework's drain window (30s) plus
+// jitter, while still surfacing a stuck reload in a reasonable time.
+const pollDeadline = 120 * time.Second
+
 // PollCmd returns a tea.Cmd that polls /reload/status until the framework
-// reload completes (success or failure) or ctx expires. Emits PolledMsg.
-//
-// Caller should construct ctx with a 120s WithTimeout so the poll
-// terminates if kubelet doesn't sync within a reasonable window.
+// reload completes (success or failure) or pollDeadline elapses. Emits
+// PolledMsg. The deadline is enforced internally; the caller's ctx is
+// only used for parent-cancellation (e.g. process shutdown).
 func PollCmd(ctx context.Context, statusURL string, applyTime time.Time) tea.Cmd {
 	return func() tea.Msg {
-		return PolledMsg{Result: PollUntilReloaded(ctx, statusURL, applyTime)}
+		c, cancel := context.WithTimeout(ctx, pollDeadline)
+		defer cancel()
+		return PolledMsg{Result: PollUntilReloaded(c, statusURL, applyTime)}
 	}
 }

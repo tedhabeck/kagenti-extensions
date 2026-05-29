@@ -168,6 +168,7 @@ func TestEditFlow_NCancelsAtDiff(t *testing.T) {
 	runner := &editFakeRunner{getResponse: []byte(editFixtureCMYAML)}
 	m := newPickerModel(context.Background(), nil, nil)
 	m.editRunner = runner.run
+	m.statusURL = "http://stub"
 	m.selectedNamespace = "team1"
 	m.selectedPod = "email-agent"
 	m.pane = panePipeline
@@ -210,6 +211,7 @@ func TestEditFlow_NormalizesTrailingNewline(t *testing.T) {
 	runner := &editFakeRunner{getResponse: []byte(editFixtureCMYAML)}
 	m := newPickerModel(context.Background(), nil, nil)
 	m.editRunner = runner.run
+	m.statusURL = "http://stub"
 	m.selectedNamespace = "team1"
 	m.selectedPod = "email-agent"
 	m.pane = panePipeline
@@ -248,6 +250,7 @@ func TestEditFlow_RollbackOnReloadFailure(t *testing.T) {
 	runner := &editFakeRunner{getResponse: []byte(editFixtureCMYAML)}
 	m := newPickerModel(context.Background(), nil, nil)
 	m.editRunner = runner.run
+	m.statusURL = "http://stub"
 	m.selectedNamespace = "team1"
 	m.selectedPod = "email-agent"
 	m.pane = panePipeline
@@ -256,10 +259,15 @@ func TestEditFlow_RollbackOnReloadFailure(t *testing.T) {
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	mm := updated.(*model)
 	fetchedMsg := cmd().(edit.FetchedMsg)
+	if fetchedMsg.Err != nil {
+		t.Fatalf("Fetch failed: %v", fetchedMsg.Err)
+	}
 	defer os.Remove(fetchedMsg.TempPath)
 
 	editedSubtree := []byte("pipeline:\n  inbound:\n    - name: bogus\n")
-	_ = os.WriteFile(fetchedMsg.TempPath, editedSubtree, 0o600)
+	if err := os.WriteFile(fetchedMsg.TempPath, editedSubtree, 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	updated, _ = mm.Update(fetchedMsg)
 	mm = updated.(*model)
@@ -268,6 +276,9 @@ func TestEditFlow_RollbackOnReloadFailure(t *testing.T) {
 	updated, cmd = mm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 	mm = updated.(*model)
 	appliedMsg := cmd().(edit.AppliedMsg)
+	if appliedMsg.Err != nil {
+		t.Fatalf("apply failed: %v", appliedMsg.Err)
+	}
 	updated, _ = mm.Update(appliedMsg)
 	mm = updated.(*model)
 
@@ -336,6 +347,7 @@ func TestEditFlow_BackgroundedSuccess(t *testing.T) {
 	runner := &editFakeRunner{getResponse: []byte(editFixtureCMYAML)}
 	m := newPickerModel(context.Background(), nil, nil)
 	m.editRunner = runner.run
+	m.statusURL = "http://stub"
 	m.selectedNamespace = "team1"
 	m.selectedPod = "email-agent"
 	m.pane = panePipeline

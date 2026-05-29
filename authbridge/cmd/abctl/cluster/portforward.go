@@ -83,9 +83,21 @@ func (k *kubectlPortForwarder) Start(ctx context.Context, namespace, pod string)
 	if err != nil {
 		return nil, err
 	}
-	statusPort, err := freeLocalPort()
-	if err != nil {
-		return nil, err
+	// freeLocalPort closes the listener it picks, leaving a tiny window
+	// where two consecutive calls can return the same port (TIME_WAIT
+	// cleared, kernel re-issues). Loop until we get a distinct one.
+	var statusPort int
+	for attempts := 0; attempts < 8; attempts++ {
+		statusPort, err = freeLocalPort()
+		if err != nil {
+			return nil, err
+		}
+		if statusPort != port {
+			break
+		}
+	}
+	if statusPort == port {
+		return nil, fmt.Errorf("port-forward: could not allocate two distinct local ports")
 	}
 	// We do NOT bind ctx to the subprocess — kubectl port-forward should
 	// outlive the per-call context (which is just for the readiness

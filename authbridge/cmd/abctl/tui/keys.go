@@ -209,6 +209,14 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		if m.pane != panePipeline {
 			return nil
 		}
+		// `e` requires the picker-mode cluster fields. In --endpoint
+		// mode none of these are set, so the keypath would crash later
+		// trying to kubectl-fetch with an empty pod/namespace. Surface
+		// the limitation in the footer instead of opening a broken edit.
+		if m.editRunner == nil || m.statusURL == "" || m.selectedNamespace == "" || m.selectedPod == "" {
+			m.setFlash("pipeline editing requires the picker (no --endpoint)")
+			return nil
+		}
 		if m.editState.phase != editPhaseDone {
 			return nil // already editing
 		}
@@ -411,6 +419,13 @@ func (m *model) handleEditKey(msg tea.KeyMsg) tea.Cmd {
 	case editPhaseError:
 		switch msg.String() {
 		case "r":
+			// If the fetch never completed (tempPath empty), retry the
+			// fetch instead of opening $EDITOR on "" (which leaves the
+			// user with nothing to edit and a misleading flow).
+			if m.editState.tempPath == "" {
+				m.editState = editState{phase: editPhaseFetching}
+				return edit.FetchCmd(m.ctx, m.editRunner, m.selectedNamespace, m.selectedPod)
+			}
 			m.editState.phase = editPhaseEditing
 			return openEditorCmd(m.editState.tempPath)
 		case "esc":
