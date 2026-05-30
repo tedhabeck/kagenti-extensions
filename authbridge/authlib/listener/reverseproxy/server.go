@@ -164,6 +164,7 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	pctx := &pipeline.Context{
 		Direction: pipeline.Inbound,
+		Method:    r.Method,
 		Scheme:    requestScheme(r),
 		Host:      r.Host,
 		Path:      r.URL.Path,

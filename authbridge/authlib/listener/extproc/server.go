@@ -144,6 +144,7 @@ func (s *Server) handleInbound(stream extprocv3.ExternalProcessor_ProcessServer,
 	ctx := stream.Context()
 	pctx := &pipeline.Context{
 		Direction: pipeline.Inbound,
+		Method:    getHeader(headers, ":method"),
 		Scheme:    getHeader(headers, ":scheme"),
 		Path:      getHeader(headers, ":path"),
 		Headers:   headerMapToHTTP(headers),
@@ -165,6 +166,7 @@ func (s *Server) handleInboundBody(stream extprocv3.ExternalProcessor_ProcessSer
 	ctx := stream.Context()
 	pctx := &pipeline.Context{
 		Direction: pipeline.Inbound,
+		Method:    getHeader(headers, ":method"),
 		Scheme:    getHeader(headers, ":scheme"),
 		Path:      getHeader(headers, ":path"),
 		Headers:   headerMapToHTTP(headers),
@@ -446,6 +448,7 @@ func (s *Server) handleOutbound(stream extprocv3.ExternalProcessor_ProcessServer
 	ctx := stream.Context()
 	pctx := &pipeline.Context{
 		Direction: pipeline.Outbound,
+		Method:    getHeader(headers, ":method"),
 		Scheme:    getHeader(headers, ":scheme"),
 		Host:      getHeader(headers, ":authority"),
 		Path:      getHeader(headers, ":path"),
@@ -483,6 +486,7 @@ func (s *Server) handleOutboundBody(stream extprocv3.ExternalProcessor_ProcessSe
 	ctx := stream.Context()
 	pctx := &pipeline.Context{
 		Direction: pipeline.Outbound,
+		Method:    getHeader(headers, ":method"),
 		Scheme:    getHeader(headers, ":scheme"),
 		Host:      getHeader(headers, ":authority"),
 		Path:      getHeader(headers, ":path"),

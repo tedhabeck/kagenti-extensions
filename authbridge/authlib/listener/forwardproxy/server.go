@@ -158,6 +158,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	pctx := &pipeline.Context{
 		Direction: pipeline.Outbound,
+		Method:    r.Method,
 		Scheme:    r.URL.Scheme,
 		Host:      r.Host,
 		Path:      r.URL.Path,
@@ -410,7 +411,8 @@ const connectDialTimeout = 30 * time.Second
 func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	pctx := &pipeline.Context{
 		Direction: pipeline.Outbound,
-		Scheme:    "tcp", // marker: bytes are opaque, not HTTP
+		Method:    r.Method, // always "CONNECT" here, but populated for parity with handleRequest
+		Scheme:    "tcp",    // marker: bytes are opaque, not HTTP
 		Host:      r.Host,
 		Path:      "",
 		Headers:   r.Header.Clone(),
