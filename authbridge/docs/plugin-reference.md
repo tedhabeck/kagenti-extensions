@@ -957,6 +957,75 @@ Binary protocols, control-plane RPCs (MCP `initialize` / `ping`,
 tools/list), and identity-only auth messages have no inspectable text —
 simply don't implement the interface.
 
+## Classifying requests as actions vs protocol mechanics
+
+A second protocol-agnostic contract sits alongside `ContentSource`:
+parser plugins set `IsAction bool` on their extensions to tell guardrails
+"is this a user-meaningful action or just protocol mechanics?"
+Guardrails read the aggregated verdict via
+[`pctx.Classification()`](../authlib/pipeline/context.go) without
+importing any specific parser package.
+
+This is the mechanism that lets a defense-in-depth guardrail (IBAC, a
+rate limiter, an audit logger) handle multi-protocol traffic uniformly:
+each parser owns its own protocol's bypass-vs-action vocabulary; the
+guardrail asks one question and gets one answer.
+
+### The contract
+
+```go
+// On every protocol extension:
+type MCPExtension struct {
+    // ... existing fields ...
+    IsAction bool  // set true for user-meaningful action methods
+}
+```
+
+Default-false: zero-value (uninitialized) means "not classified as an
+action," which guardrails treat as bypass. Parsers explicitly set
+`IsAction = true` for the small set of methods that carry user intent
+on the wire. This matches IBAC's defense-in-depth posture: when in
+doubt, err toward letting traffic through, not toward judging it.
+
+### Classification per in-tree parser
+
+| Parser | `IsAction = true` for | Notes |
+|---|---|---|
+| `mcp-parser` | `tools/call`, `prompts/get`, `resources/read` | All other JSON-RPC methods (housekeeping, notifications, list ops, subscribe/unsubscribe) inherit default false. Synthetic transport extensions (`$transport/stream`, `$transport/terminate`) also stay at default false. |
+| `a2a-parser` | `message/send`, `message/stream` | Discovery / protocol setup methods inherit default false. |
+| `inference-parser` | every populated case | An LLM call is always an action on the wire; "don't judge inference by default" lives as IBAC operator policy, not in the classification. |
+
+### Consuming the classification in a guardrail
+
+```go
+func (p *RateLimiter) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
+    isAction, isBypass := pctx.Classification()
+    if isBypass {
+        // Some parser said "this is protocol mechanics" — don't count it.
+        return pipeline.Action{Type: pipeline.Continue}
+    }
+    if !isAction {
+        // No parser claimed this request — defense in depth, pass through.
+        return pipeline.Action{Type: pipeline.Continue}
+    }
+    // Action — count it against the rate limit.
+    return p.limit(pctx)
+}
+```
+
+The shape matches IBAC's gate: skip on bypass, pass-through when
+unclassified, act on action.
+
+### When NOT to set IsAction=true
+
+Most parser methods are not actions. The bar for marking a method
+`IsAction = true` is "guardrails would correctly want to judge or
+rate-limit or audit this on a per-call basis." Discovery, capability
+listing, subscription management, notifications, transport
+housekeeping — none of those qualify. Adding a method to the action
+set is a security-relevant change because it pulls the method into
+every guardrail's evaluation surface; review accordingly.
+
 ## Registering a plugin
 
 A plugin advertises itself to the pipeline builder through `RegisterPlugin`

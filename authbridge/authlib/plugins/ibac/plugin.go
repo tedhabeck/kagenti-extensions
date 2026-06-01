@@ -10,12 +10,18 @@
 // IBAC catches the outbound exfiltration by comparing the action
 // against the recorded intent via an LLM judge.
 //
+// IBAC is defense in depth, not a general gatekeeper. It only fires
+// on traffic a protocol parser classified — pctx.Classification()
+// reports whether any populated extension has IsAction=true. Requests
+// nobody classified pass through silently. Per-protocol bypass
+// vocabulary (MCP housekeeping methods, transport-layer SSE/session-
+// terminate idioms, A2A discovery, etc.) lives in the parsers, not
+// here — IBAC just reads the verdict.
+//
 // Per-request only — no cross-request session-scoped state. Requires
-// an a2a-parser in the inbound chain (runtime dependency, fail-closed
-// when LastIntent is nil or no session has been seeded yet) and works
-// alongside an optional mcp-parser (After ordering hint) for richer
-// action descriptions and to bypass MCP protocol housekeeping
-// (initialize, *list, notifications/*) that carries no intent.
+// at least one of mcp-parser, a2a-parser, or inference-parser in the
+// pipeline (RequiresAny) so there's something to drive classification
+// — otherwise IBAC would silently no-op on every request.
 package ibac
 
 import (
@@ -105,12 +111,50 @@ type ibacConfig struct {
 	// the right behavior automatically; deployments that want hard
 	// fail-closed semantics opt in via "deny".
 	NoIntentPolicy string `json:"no_intent_policy"`
+
+	// UnclassifiedPolicy controls behavior at step 4 (the
+	// classification gate) when no protocol parser populated any
+	// extension on this request — i.e. the request is unclassified.
+	// Two values:
+	//
+	//   - "passthrough" (default): record no Skip, return Continue.
+	//     IBAC's defense-in-depth posture — only judge traffic that
+	//     a parser claimed. Plain-HTTP outbound, CORS preflights,
+	//     OAuth metadata fetches, agent-card discovery, and any
+	//     other request shape that the configured parsers don't
+	//     recognize all pass through silently. Pair with egress
+	//     allowlists / NetworkPolicy for plain-HTTP egress control.
+	//
+	//   - "judge": fall through to the inference policy and intent
+	//     extraction even when no parser claimed the request. Sends
+	//     plain-HTTP outbound (e.g. raw http.Post from local
+	//     function-calling tools) to the judge alongside the
+	//     classified action paths. Wider coverage; comes with the
+	//     standard IBAC operational cost (one extra LLM round-trip
+	//     per outbound request) for traffic that may not benefit
+	//     from intent alignment. Recommended for the IBAC demo and
+	//     for deployments where any outbound request from the agent
+	//     matters and there isn't a complementary egress control.
+	//
+	// The default is "passthrough" because production deployments
+	// using MCP / A2A / inference get full coverage from the
+	// parser-driven classification, and the cost of judging
+	// arbitrary HTTP traffic isn't paid for by most operators.
+	// The IBAC demo opts into "judge" to keep its plain-HTTP exfil
+	// scenario operational.
+	UnclassifiedPolicy string `json:"unclassified_policy"`
 }
 
 // no_intent_policy values.
 const (
 	NoIntentPolicyAllow = "allow"
 	NoIntentPolicyDeny  = "deny"
+)
+
+// unclassified_policy values.
+const (
+	UnclassifiedPolicyPassthrough = "passthrough"
+	UnclassifiedPolicyJudge       = "judge"
 )
 
 // defaultBypassHosts is the conservative starting set. Operators with
@@ -155,6 +199,9 @@ func (c *ibacConfig) applyDefaults() {
 	if c.NoIntentPolicy == "" {
 		c.NoIntentPolicy = NoIntentPolicyAllow
 	}
+	if c.UnclassifiedPolicy == "" {
+		c.UnclassifiedPolicy = UnclassifiedPolicyPassthrough
+	}
 }
 
 func (c *ibacConfig) validate() error {
@@ -197,6 +244,13 @@ func (c *ibacConfig) validate() error {
 		return fmt.Errorf("no_intent_policy must be %q or %q, got %q",
 			NoIntentPolicyAllow, NoIntentPolicyDeny, c.NoIntentPolicy)
 	}
+	switch c.UnclassifiedPolicy {
+	case UnclassifiedPolicyPassthrough, UnclassifiedPolicyJudge:
+		// ok
+	default:
+		return fmt.Errorf("unclassified_policy must be %q or %q, got %q",
+			UnclassifiedPolicyPassthrough, UnclassifiedPolicyJudge, c.UnclassifiedPolicy)
+	}
 	return nil
 }
 
@@ -222,11 +276,24 @@ func (p *IBAC) Name() string { return "ibac" }
 
 func (p *IBAC) Capabilities() pipeline.PluginCapabilities {
 	return pipeline.PluginCapabilities{
-		// mcp-parser is optional enrichment; if it's in the chain
-		// IBAC must come after so it can read the parsed tool name
-		// and args. If it's absent, IBAC still functions on raw
-		// HTTP — the judge sees method+host+path+body excerpt.
-		After:       []string{"mcp-parser"},
+		// At least one outbound protocol parser must run before IBAC.
+		// IBAC is a defense-in-depth layer that only fires on traffic
+		// a parser classified — without a parser, IBAC has no way to
+		// tell user-meaningful actions from protocol mechanics, and
+		// would either silently no-op or judge everything (defeats the
+		// parser-driven design). Boot-fail if no parser is present
+		// rather than ship a misconfigured pipeline.
+		//
+		// a2a-parser is deliberately NOT in this list. RequiresAny is
+		// a same-chain check, and a2a-parser runs in the INBOUND
+		// chain in every in-tree config (it seeds Session.LastIntent
+		// from inbound A2A user turns). IBAC's a2a dependency is the
+		// inbound session-intent seeding, which the validator can't
+		// enforce cross-chain anyway — that dependency is runtime,
+		// governed by no_intent_policy. Listing a2a-parser here would
+		// only make a misconfigured outbound chain [a2a-parser, ibac]
+		// pass validation while populating nothing useful for IBAC.
+		RequiresAny: []string{"mcp-parser", "inference-parser"},
 		ReadsBody:   true,
 		Description: "LLM-judge intent-based access control for outbound tool calls.",
 	}
@@ -282,64 +349,64 @@ func (p *IBAC) OnRequest(ctx context.Context, pctx *pipeline.Context) pipeline.A
 		return pipeline.Action{Type: pipeline.Continue}
 	}
 
-	// 4. Inference-traffic skip when JudgeInference is false (default).
-	//    Judging the agent's own LLM reasoning is meta-judgment;
-	//    operators can opt in by flipping the config flag.
+	// 4. Classification gate. Parsers (mcp-parser, a2a-parser,
+	//    inference-parser) are the source of truth for "is this a
+	//    user-meaningful action vs protocol mechanics?" — IBAC just
+	//    reads their verdict via pctx.Classification(). Two outcomes
+	//    short-circuit IBAC here:
+	//
+	//      - anyBypass: at least one populated extension explicitly
+	//        classified the request as bypass-worthy (e.g. mcp-parser
+	//        saw "tools/list" or a $transport/* synthetic event;
+	//        a2a-parser saw a discovery method). Skip with reason
+	//        "protocol_mechanics".
+	//      - !anyAction: no populated extension classified this as an
+	//        action — i.e. the request is unclassified. Behavior is
+	//        controlled by UnclassifiedPolicy:
+	//          * "passthrough" (default): record no Skip, return
+	//            Continue. Defense-in-depth — IBAC only fires on
+	//            traffic a parser claimed.
+	//          * "judge": fall through to the inference policy and
+	//            intent extraction. Catches plain-HTTP outbound
+	//            (e.g. raw http.Post from local function-calling
+	//            tools) at the cost of one judge round-trip per
+	//            unclassified request. Used by the IBAC demo.
+	//
+	//    Action-classified traffic (anyAction=true && !anyBypass)
+	//    always falls through to the inference policy and judge below.
+	//    Mixed classification (anyAction=true && anyBypass=true) is
+	//    rare; the bypass branch wins because the safer default for
+	//    a defense-in-depth control is to defer to the more permissive
+	//    classification.
+	anyAction, anyBypass := pctx.Classification()
+	if anyBypass {
+		pctx.Skip("protocol_mechanics")
+		return pipeline.Action{Type: pipeline.Continue}
+	}
+	if !anyAction {
+		if p.cfg.UnclassifiedPolicy == UnclassifiedPolicyPassthrough {
+			// Defense-in-depth pass-through: no parser claimed the
+			// request, IBAC has no basis to judge it. Don't record a
+			// Skip — there's no Invocation to pair with, and operators
+			// infer "ibac is in the pipeline" from config rather than
+			// from per-event rows.
+			return pipeline.Action{Type: pipeline.Continue}
+		}
+		// UnclassifiedPolicy == "judge" — fall through to the
+		// inference policy and intent / judge steps below. The IBAC
+		// demo's plain-HTTP exfiltration scenario relies on this
+		// branch.
+	}
+
+	// 5. Inference-traffic skip when JudgeInference is false (default).
+	//    This is operator policy ("don't judge the agent's own LLM
+	//    reasoning by default"), distinct from the parser classification
+	//    above — inference-parser correctly classifies LLM calls as
+	//    actions; this step decides whether to honor that classification
+	//    for inference traffic specifically. Operators flip
+	//    judge_inference: true to opt in to judging.
 	if pctx.Extensions.Inference != nil && !p.cfg.JudgeInference {
 		pctx.Skip("inference_bypass")
-		return pipeline.Action{Type: pipeline.Continue}
-	}
-
-	// 5. MCP protocol-housekeeping skip. initialize / notifications /
-	//    *list methods are connection setup and capability discovery —
-	//    they happen before any user request (e.g. agent startup) and
-	//    carry no actionable intent. Same shape as inference_bypass:
-	//    judging them would be a category error, and denying them
-	//    breaks every agent that opens an MCP connection at startup.
-	//    Only methods that invoke side effects (tools/call, prompts/get,
-	//    resources/read) reach the judge.
-	if pctx.Extensions.MCP != nil && isMCPHousekeeping(pctx.Extensions.MCP.Method) {
-		pctx.Skip("mcp_housekeeping")
-		return pipeline.Action{Type: pipeline.Continue}
-	}
-
-	// 5b. Transport-stream bypass. Two patterns of requests carry no
-	//     user-meaningful action and must skip the judge:
-	//
-	//       - Body-less GET/HEAD/OPTIONS: retrieval-shaped calls
-	//         (MCP Streamable HTTP server→client SSE channel-open,
-	//         agent-card fetches, OAuth metadata probes, CORS
-	//         preflights, HEAD existence/cache-validation probes).
-	//
-	//       - Body-less DELETE with the Mcp-Session-Id header: MCP
-	//         Streamable HTTP session termination, sent by the MCP
-	//         client SDK at end-of-conversation to release server-
-	//         side session state. The header is set by the SDK, not
-	//         user input, so it's a precise distinguisher from a
-	//         "DELETE /api/users/42" real-action call.
-	//
-	//     Sending either to the judge is a category error: there's
-	//     nothing to judge, and the LLM either denies for lack of
-	//     context or misinterprets the verb (e.g. correctly noting
-	//     "DELETE involves deleting data" without knowing it's
-	//     protocol session cleanup).
-	//
-	//     Threat model: an attacker can't smuggle a payload through
-	//     a body-less request — there's no body to put it in. Side-
-	//     effect HTTP methods (POST/PUT/DELETE/PATCH) always reach
-	//     the judge when they carry a body. Body-less DELETE without
-	//     the Mcp-Session-Id header — a real "delete this resource"
-	//     call by URL path — also reaches the judge.
-	//
-	//     Caveat: servers that handle side-effect operations through
-	//     GET query strings (e.g. ?action=delete&id=42) violate REST
-	//     semantics and would bypass IBAC here — by design. Defending
-	//     against that needs to live in the server, not in IBAC; the
-	//     plugin trusts HTTP method semantics as a proxy for "is this
-	//     an action?", and a server that breaks that convention is
-	//     making its own authorization promises that IBAC can't see.
-	if isTransportShaped(pctx) {
-		pctx.Skip("transport_stream")
 		return pipeline.Action{Type: pipeline.Continue}
 	}
 
@@ -583,85 +650,6 @@ func formatBodyExcerpt(body []byte, n int) string {
 		}
 	}
 	return fmt.Sprintf("%q", string(body))
-}
-
-// isMCPHousekeeping reports whether an MCP method is connection-setup,
-// capability-discovery, or subscription-management traffic that
-// carries no user-actionable intent. These methods fire before, after,
-// or alongside user turns as protocol mechanics — judging them would
-// either panic on a nil session or deny on no_intent, breaking agents
-// that open MCP connections at startup or maintain resource
-// subscriptions. Only side-effect methods (tools/call, prompts/get,
-// resources/read) reach the judge.
-//
-// resources/subscribe and resources/unsubscribe are subscription-
-// state management — the client tells the server "notify me when
-// this resource changes" / "stop notifying me." They go through POST
-// with a JSON-RPC body (so the body-less transport_stream bypass
-// doesn't apply), but they're conceptually identical to *list calls:
-// protocol bookkeeping, not user-meaningful actions.
-//
-// JSON-RPC notifications (any method starting with `notifications/`)
-// are also bypassed: they're one-way protocol signals, never tied to
-// a specific user turn.
-func isMCPHousekeeping(method string) bool {
-	switch method {
-	case "initialize",
-		"ping",
-		"tools/list",
-		"prompts/list",
-		"resources/list",
-		"resources/templates/list",
-		"resources/subscribe",
-		"resources/unsubscribe",
-		"completion/complete",
-		"logging/setLevel":
-		return true
-	}
-	return strings.HasPrefix(method, "notifications/")
-}
-
-// isTransportRetrieval reports whether an HTTP method is one of the
-// retrieval-shaped methods that, combined with an empty body, signal
-// "transport-layer call, not a user-meaningful action." See step 5b
-// in OnRequest for the full threat-model rationale.
-//
-// HEAD shares GET's semantics by RFC 9110 §9.3.2 (servers MUST answer
-// HEAD identically to GET, sans body); OPTIONS is CORS preflight or
-// capability discovery, never an action.
-func isTransportRetrieval(method string) bool {
-	switch method {
-	case "GET", "HEAD", "OPTIONS":
-		return true
-	}
-	return false
-}
-
-// isTransportShaped reports whether a request matches a transport-
-// layer pattern that carries no user-meaningful action — should be
-// skipped before the intent check. Combines two body-less shapes:
-//
-//   - retrieval (GET / HEAD / OPTIONS): see isTransportRetrieval.
-//   - MCP Streamable HTTP session termination: DELETE with the
-//     Mcp-Session-Id header. The MCP spec defines this as the way
-//     a client releases server-side session state at end-of-
-//     conversation; the header is set by the client SDK, not user
-//     input, so it's a precise distinguisher from a real
-//     "DELETE /api/resource" action call.
-//
-// A request with a non-empty body is always treated as an action,
-// regardless of method.
-func isTransportShaped(pctx *pipeline.Context) bool {
-	if len(pctx.Body) > 0 {
-		return false
-	}
-	if isTransportRetrieval(pctx.Method) {
-		return true
-	}
-	if pctx.Method == "DELETE" && pctx.Headers.Get("Mcp-Session-Id") != "" {
-		return true
-	}
-	return false
 }
 
 // extractMCPToolName pulls the tool name from a tools/call request's
