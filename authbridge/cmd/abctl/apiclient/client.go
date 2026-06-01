@@ -119,16 +119,30 @@ type PluginCatalog struct {
 // post-Normalize); the older bodyAccess alias is intentionally NOT
 // emitted on this new wire shape.
 type PluginCatalogEntry struct {
-	Name        string   `json:"name"`
-	Direction   string   `json:"direction,omitempty"`
-	ReadsBody   bool     `json:"readsBody,omitempty"`
-	Writes      []string `json:"writes,omitempty"`
-	Reads       []string `json:"reads,omitempty"`
-	Requires    []string `json:"requires,omitempty"`
-	RequiresAny []string `json:"requiresAny,omitempty"`
-	After       []string `json:"after,omitempty"`
-	Claims      []string `json:"claims,omitempty"`
-	Description string   `json:"description,omitempty"`
+	Name        string             `json:"name"`
+	Direction   string             `json:"direction,omitempty"`
+	ReadsBody   bool               `json:"readsBody,omitempty"`
+	Writes      []string           `json:"writes,omitempty"`
+	Reads       []string           `json:"reads,omitempty"`
+	Requires    []string           `json:"requires,omitempty"`
+	RequiresAny []string           `json:"requiresAny,omitempty"`
+	After       []string           `json:"after,omitempty"`
+	Claims      []string           `json:"claims,omitempty"`
+	Description string             `json:"description,omitempty"`
+	Fields      []PluginFieldEntry `json:"fields,omitempty"`
+}
+
+// PluginFieldEntry mirrors sessionapi.FieldSchemaEntry — per-field
+// schema metadata for a plugin's config. Used by abctl edit's
+// templates renderer; nil for plugins without configs.
+type PluginFieldEntry struct {
+	Name        string             `json:"name"`
+	Type        string             `json:"type"`
+	Required    bool               `json:"required,omitempty"`
+	Description string             `json:"description,omitempty"`
+	Default     string             `json:"default,omitempty"`
+	Enum        []string           `json:"enum,omitempty"`
+	Fields      []PluginFieldEntry `json:"fields,omitempty"`
 }
 
 // GetPluginCatalog fetches /v1/plugins. Returns ErrNotFound when the

@@ -7,6 +7,8 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/kagenti/kagenti-extensions/authbridge/cmd/abctl/apiclient"
 )
 
 // tempFileMaxAge is how long a stale edit tempfile is allowed to sit
@@ -42,9 +44,14 @@ func SweepStaleTempfiles() int {
 
 // FetchedMsg is the result of FetchCmd. On success: Fetched and TempPath
 // are both set, Err is nil. On failure: Err is populated, others are zero.
+//
+// Catalog carries the catalog used to render templates, so the TUI can
+// cache it into m.catalog after a fresh fetch. Nil when the caller
+// supplied a cached catalog or no client.
 type FetchedMsg struct {
 	Fetched  *FetchedPipeline
 	TempPath string // path to the tempfile holding just the pipeline subtree
+	Catalog  *apiclient.PluginCatalog
 	Err      error
 }
 
@@ -54,7 +61,20 @@ type FetchedMsg struct {
 // $EDITOR), and emits FetchedMsg. The tempfile lives in $TMPDIR; abctl
 // leaves it in place on every exit path (success, error, abort) so users
 // can recover an in-progress edit.
-func FetchCmd(ctx context.Context, run Runner, namespace, pod string) tea.Cmd {
+//
+// cachedCatalog is the catalog the TUI has already fetched (e.g. via
+// the catalog pane). When non-nil it's used as-is to render templates.
+// When nil and client is non-nil, FetchCmd fetches it inline so the
+// edit experience works on first 'e' press without requiring the
+// operator to open the catalog pane first. Both nil → no templates
+// (used by tests and degraded server paths).
+func FetchCmd(
+	ctx context.Context,
+	run Runner,
+	client *apiclient.Client,
+	namespace, pod string,
+	cachedCatalog []apiclient.PluginCatalogEntry,
+) tea.Cmd {
 	return func() tea.Msg {
 		agent, err := ResolveAgentName(ctx, run, namespace, pod)
 		if err != nil {
@@ -64,6 +84,19 @@ func FetchCmd(ctx context.Context, run Runner, namespace, pod string) tea.Cmd {
 		if err != nil {
 			return FetchedMsg{Err: err}
 		}
+
+		// Resolve the catalog: prefer cached, otherwise fetch inline.
+		// Catalog-fetch failure is non-fatal — the edit still opens
+		// without templates, mirroring the older "no catalog" path.
+		catalog := cachedCatalog
+		var freshCatalog *apiclient.PluginCatalog
+		if catalog == nil && client != nil {
+			if c, err := client.GetPluginCatalog(ctx); err == nil && c != nil {
+				freshCatalog = c
+				catalog = c.Plugins
+			}
+		}
+
 		tmp, err := os.CreateTemp("", "abctl-pipeline-*.yaml")
 		if err != nil {
 			return FetchedMsg{Err: err}
@@ -73,11 +106,17 @@ func FetchCmd(ctx context.Context, run Runner, namespace, pod string) tea.Cmd {
 			tmp.Close()
 			return FetchedMsg{Err: err}
 		}
+		if templates := RenderTemplates(catalog); len(templates) > 0 {
+			if _, err := tmp.Write(templates); err != nil {
+				tmp.Close()
+				return FetchedMsg{Err: err}
+			}
+		}
 		path := tmp.Name()
 		if err := tmp.Close(); err != nil {
 			return FetchedMsg{Err: err}
 		}
-		return FetchedMsg{Fetched: fp, TempPath: path}
+		return FetchedMsg{Fetched: fp, TempPath: path, Catalog: freshCatalog}
 	}
 }
 

@@ -633,6 +633,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.editState.fetched = msg.Fetched
 		m.editState.tempPath = msg.TempPath
 		m.editState.phase = editPhaseEditing
+		// FetchCmd may have fetched the catalog inline so it could
+		// render the templates section. Cache it so the catalog pane
+		// (P) and the post-save validator both reuse it without a
+		// second round-trip.
+		if msg.Catalog != nil {
+			m.catalog = msg.Catalog
+		}
 		return m, openEditorCmd(m.editState.generation, msg.TempPath)
 
 	case editorExitedMsg:
@@ -650,6 +657,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.editState.err = "read edited file: " + err.Error()
 			return m, nil
 		}
+		// Strip the templates reference section before any downstream
+		// processing — the empty-check, YAML parse, splice preview, and
+		// validation all expect to see only the active pipeline subtree.
+		// No-op when the catalog wasn't included at fetch time (no fence
+		// marker present in the buffer).
+		edited = edit.StripTemplates(edited)
 		// Fix 2: reject empty input before it can silently wipe the pipeline.
 		if len(bytes.TrimSpace(edited)) == 0 {
 			m.editState.phase = editPhaseError

@@ -52,16 +52,31 @@ type Server struct {
 // that documents bodyAccess as deprecated, so there's no compat cost to
 // emit the right name from day one.
 type CatalogEntry struct {
-	Name        string   `json:"name"`
-	Direction   string   `json:"direction,omitempty"`
-	ReadsBody   bool     `json:"readsBody,omitempty"`
-	Writes      []string `json:"writes,omitempty"`
-	Reads       []string `json:"reads,omitempty"`
-	Requires    []string `json:"requires,omitempty"`
-	RequiresAny []string `json:"requiresAny,omitempty"`
-	After       []string `json:"after,omitempty"`
-	Claims      []string `json:"claims,omitempty"`
-	Description string   `json:"description,omitempty"`
+	Name        string             `json:"name"`
+	Direction   string             `json:"direction,omitempty"`
+	ReadsBody   bool               `json:"readsBody,omitempty"`
+	Writes      []string           `json:"writes,omitempty"`
+	Reads       []string           `json:"reads,omitempty"`
+	Requires    []string           `json:"requires,omitempty"`
+	RequiresAny []string           `json:"requiresAny,omitempty"`
+	After       []string           `json:"after,omitempty"`
+	Claims      []string           `json:"claims,omitempty"`
+	Description string             `json:"description,omitempty"`
+	Fields      []FieldSchemaEntry `json:"fields,omitempty"`
+}
+
+// FieldSchemaEntry is the wire shape for one config field's schema
+// metadata. Mirrors pipeline.FieldSchema; lives in the sessionapi
+// package so consumers (abctl apiclient, future kagenti-UI clients)
+// don't have to import authlib/pipeline transitively.
+type FieldSchemaEntry struct {
+	Name        string             `json:"name"`
+	Type        string             `json:"type"`
+	Required    bool               `json:"required,omitempty"`
+	Description string             `json:"description,omitempty"`
+	Default     string             `json:"default,omitempty"`
+	Enum        []string           `json:"enum,omitempty"`
+	Fields      []FieldSchemaEntry `json:"fields,omitempty"`
 }
 
 // CatalogProvider is the function the binary supplies to expose

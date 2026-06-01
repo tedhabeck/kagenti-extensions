@@ -14,7 +14,7 @@ func TestFetchCmd_Success(t *testing.T) {
 	stub := func(ctx context.Context, args ...string) ([]byte, error) {
 		return []byte(fixtureCMYAML), nil
 	}
-	cmd := FetchCmd(context.Background(), stub, "team1", "email-agent")
+	cmd := FetchCmd(context.Background(), stub, nil, "team1", "email-agent", nil)
 	msg := cmd().(FetchedMsg)
 	if msg.Err != nil {
 		t.Fatalf("FetchedMsg.Err = %v", msg.Err)
@@ -31,7 +31,7 @@ func TestFetchCmd_Error(t *testing.T) {
 	stub := func(ctx context.Context, args ...string) ([]byte, error) {
 		return nil, fmt.Errorf("forbidden")
 	}
-	cmd := FetchCmd(context.Background(), stub, "team1", "email-agent")
+	cmd := FetchCmd(context.Background(), stub, nil, "team1", "email-agent", nil)
 	msg := cmd().(FetchedMsg)
 	if msg.Err == nil {
 		t.Fatal("expected error")

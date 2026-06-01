@@ -81,12 +81,20 @@ func RegisteredPlugins() []string {
 }
 
 // CatalogEntry pairs a registered plugin's name with the capabilities
-// it advertises. Surfaces in `abctl`'s catalog pane and in the
-// /v1/plugins endpoint so operators can see what plugins exist and
-// what each one needs without reading source.
+// it advertises and the field-level schema of its config (if it
+// implements pipeline.SchemaProvider). Surfaces in `abctl`'s catalog
+// pane, in the /v1/plugins endpoint, and in `abctl edit`'s template
+// renderer so operators can see what plugins exist, what each one
+// needs, and what each field means without reading source.
+//
+// Fields is nil for plugins without a config (or that don't
+// implement SchemaProvider) — the wire format omits the field via
+// `omitempty`, so existing consumers that don't know about field
+// schemas keep working.
 type CatalogEntry struct {
 	Name         string
 	Capabilities pipeline.PluginCapabilities
+	Fields       []pipeline.FieldSchema
 }
 
 // catalogCache memoizes the Catalog() result on first call. Constructors
@@ -139,10 +147,21 @@ func Catalog() []CatalogEntry {
 	defer registryMu.RUnlock()
 	out := make([]CatalogEntry, 0, len(registry))
 	for name, factory := range registry {
-		out = append(out, CatalogEntry{
+		instance := factory()
+		entry := CatalogEntry{
 			Name:         name,
-			Capabilities: factory().Capabilities().Normalize(),
-		})
+			Capabilities: instance.Capabilities().Normalize(),
+		}
+		// Plugins that implement SchemaProvider expose per-field
+		// metadata for templating. Constraints carry over from the
+		// constructor contract above: the throwaway instance is never
+		// Shutdown'd, so SchemaProvider implementations must be
+		// instance-state-independent and side-effect free (typically
+		// just `return pipeline.SchemaOf(myConfig{})`).
+		if sp, ok := instance.(pipeline.SchemaProvider); ok {
+			entry.Fields = sp.ConfigSchema()
+		}
+		out = append(out, entry)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	catalogCacheVal = out
@@ -175,7 +194,25 @@ func cloneCatalog(in []CatalogEntry) []CatalogEntry {
 				After:       append([]string(nil), caps.After...),
 				Claims:      append([]string(nil), caps.Claims...),
 			},
+			Fields: cloneFieldSchemas(in[i].Fields),
 		}
+	}
+	return out
+}
+
+// cloneFieldSchemas deep-copies the per-field schema slice. Fields
+// itself is a slice, but each FieldSchema also contains slices
+// (Enum, Fields for nested structs) that need their own backing
+// arrays to avoid aliasing the cached snapshot.
+func cloneFieldSchemas(in []pipeline.FieldSchema) []pipeline.FieldSchema {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]pipeline.FieldSchema, len(in))
+	for i, f := range in {
+		out[i] = f
+		out[i].Enum = append([]string(nil), f.Enum...)
+		out[i].Fields = cloneFieldSchemas(f.Fields) // recurse for nested struct fields
 	}
 	return out
 }

@@ -6,8 +6,21 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/kagenti/kagenti-extensions/authbridge/cmd/abctl/apiclient"
 	"github.com/kagenti/kagenti-extensions/authbridge/cmd/abctl/edit"
 )
+
+// catalogPlugins extracts the plugin slice from a (possibly nil)
+// catalog snapshot so FetchCmd can render templates inline. Nil-safe:
+// if the catalog hasn't loaded yet (--endpoint mode without
+// /v1/plugins, or first-edit-before-poll), the edit just opens
+// without templates rather than blocking.
+func catalogPlugins(c *apiclient.PluginCatalog) []apiclient.PluginCatalogEntry {
+	if c == nil {
+		return nil
+	}
+	return c.Plugins
+}
 
 // handleKey processes every key press. The filter-input overlay takes
 // precedence; otherwise keys are dispatched based on the active pane.
@@ -247,7 +260,7 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		}
 		gen := m.editState.generation + 1
 		m.editState = editState{phase: editPhaseFetching, generation: gen}
-		return withGen(gen, edit.FetchCmd(m.ctx, m.editRunner, m.selectedNamespace, m.selectedPod))
+		return withGen(gen, edit.FetchCmd(m.ctx, m.editRunner, m.client, m.selectedNamespace, m.selectedPod, catalogPlugins(m.catalog)))
 
 	case "g":
 		m.goTop()
@@ -504,7 +517,7 @@ func (m *model) handleEditKey(msg tea.KeyMsg) tea.Cmd {
 			if m.editState.tempPath == "" {
 				gen := m.editState.generation + 1
 				m.editState = editState{phase: editPhaseFetching, generation: gen}
-				return withGen(gen, edit.FetchCmd(m.ctx, m.editRunner, m.selectedNamespace, m.selectedPod))
+				return withGen(gen, edit.FetchCmd(m.ctx, m.editRunner, m.client, m.selectedNamespace, m.selectedPod, catalogPlugins(m.catalog)))
 			}
 			m.editState.phase = editPhaseEditing
 			return openEditorCmd(m.editState.generation, m.editState.tempPath)

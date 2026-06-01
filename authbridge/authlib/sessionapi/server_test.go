@@ -718,6 +718,63 @@ func TestHandlePluginCatalog_ListsRegisteredPlugins(t *testing.T) {
 	}
 }
 
+// TestHandlePluginCatalog_IncludesFieldSchemas confirms field-level
+// schemas attached by the catalog provider make it onto the wire
+// (and that omitempty hides them when absent).
+func TestHandlePluginCatalog_IncludesFieldSchemas(t *testing.T) {
+	stub := func() []CatalogEntry {
+		return []CatalogEntry{
+			{
+				Name:        "alpha",
+				Description: "Has fields",
+				Fields: []FieldSchemaEntry{
+					{Name: "endpoint", Type: "string", Required: true, Description: "API URL."},
+					{Name: "policy", Type: "string", Default: "allow", Enum: []string{"allow", "deny"}},
+				},
+			},
+			{Name: "beta", Description: "No fields"},
+		}
+	}
+	store := session.New(5*time.Minute, 100, 0)
+	defer store.Close()
+	srv := New(":0", store, WithCatalog(stub))
+	ts := httptest.NewServer(srv.server.Handler)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/v1/plugins")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	var body struct {
+		Plugins []CatalogEntry `json:"plugins"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Plugins) != 2 {
+		t.Fatalf("plugins = %d, want 2", len(body.Plugins))
+	}
+	// alpha: fields populated, including required/enum/default.
+	if got := len(body.Plugins[0].Fields); got != 2 {
+		t.Fatalf("alpha.Fields = %d, want 2", got)
+	}
+	if !body.Plugins[0].Fields[0].Required {
+		t.Errorf("alpha.endpoint should be required")
+	}
+	if body.Plugins[0].Fields[1].Default != "allow" {
+		t.Errorf("alpha.policy.Default = %q", body.Plugins[0].Fields[1].Default)
+	}
+	if got := len(body.Plugins[0].Fields[1].Enum); got != 2 {
+		t.Errorf("alpha.policy.Enum length = %d", got)
+	}
+	// beta: no fields → wire format omits the field; decoded slice is nil/empty.
+	if len(body.Plugins[1].Fields) != 0 {
+		t.Errorf("beta.Fields should be empty, got %+v", body.Plugins[1].Fields)
+	}
+}
+
 func TestHandlePluginCatalog_NoProvider404(t *testing.T) {
 	store := session.New(5*time.Minute, 100, 0)
 	defer store.Close()
