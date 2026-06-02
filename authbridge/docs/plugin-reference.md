@@ -84,6 +84,25 @@ and `expected_audience_host` (waypoint per-request derived audience, may
 be empty). Update saved queries and dashboards that filtered on the old
 key.
 
+### `jwt-validation`: `placeholder_mode` / `placeholder_ttl` (optional, off by default)
+
+Two fields enable the **mint** half of [credential placeholder
+swap](#credential-placeholder-swap) (read that section for the full
+model — these are the field-level reference).
+
+- **`placeholder_mode`** — bool, default `false`. After validating the
+  inbound token, replace it with an opaque `abph_`-prefixed placeholder
+  before forwarding to the agent. The real token is held in the
+  process-scoped shared store for the outbound path to resolve. Requires
+  `token-exchange` with `resolve_placeholders: true` on the outbound
+  chain to be coherent (see the matched-pair note below).
+- **`placeholder_ttl`** — Go duration string (e.g. `30m`, `1h`), default
+  `1h`. How long the real token is retained for outbound resolution.
+
+Mint requires `pctx.Shared` to be wired by the listener; if it is nil
+when `placeholder_mode` is on, the plugin fails fast at init (a deploy
+error) rather than silently forwarding the real token.
+
 ## `on_error` policy
 
 > **Naming caveat.** Despite the name, `on_error` controls how the
@@ -1063,6 +1082,82 @@ Plugins keep ownership of:
 - The mapping from LLM output to a pipeline `Action` (e.g. IBAC normalizes `verdict: "allow"|"deny"` and treats anything else as `ActionDeny` with reason `ibac.judge_uncertain`).
 
 The IBAC plugin (`authlib/plugins/ibac/judge.go`) is the in-tree reference; copy its shape when adding a new LLM-using plugin. For what IBAC actually does end-to-end (threat model, configuration, deny-reason vocabulary), see [`ibac-plugin.md`](ibac-plugin.md).
+
+## Credential placeholder swap
+
+An opt-in mode that keeps the **real** user token out of the agent. With
+it on, `jwt-validation` validates the inbound token and then replaces it
+with an opaque `abph_` placeholder before forwarding to the agent; the
+real token is held in a process-scoped shared store. On the way out,
+`token-exchange` resolves the placeholder back to the real token (on a
+matched route) before its normal RFC 8693 exchange. The agent thus holds
+only an opaque handle, never a usable credential.
+
+For the design rationale, data flow, and branch table, see
+[`docs/superpowers/specs/2026-06-02-credential-placeholder-swap-design.md`](./superpowers/specs/2026-06-02-credential-placeholder-swap-design.md).
+
+### The two flags are a matched pair
+
+| Flag | Plugin | Chain | Role |
+|---|---|---|---|
+| `placeholder_mode` | `jwt-validation` | inbound | **mint** — swap real token → `abph_` handle |
+| `resolve_placeholders` | `token-exchange` | outbound | **resolve** — swap `abph_` handle → real token, then exchange |
+
+Both must be on to be coherent:
+
+- **Mint on, resolve off** → the outbound side sees an `abph_` subject it
+  can't use and **fails closed (deny)**. Safe and visible, but broken.
+- **Resolve on, mint off** → no `abph_` tokens are ever produced, so
+  resolve is a **no-op**; normal exchange is unaffected.
+
+The pairing can't be expressed via `Requires` (that checks plugin
+*name*, not config *state*), so v1 relies on the fail-closed deny plus
+this documentation rather than build-time cross-validation.
+
+### `token-exchange`: `resolve_placeholders`
+
+Bool, default `false`. When the outbound bearer carries the `abph_`
+prefix, resolve it from the shared store to the real token before the
+normal exchange. An unresolvable placeholder (unknown or expired —
+e.g. after a sidecar restart) is **denied, fail-closed**; the opaque
+string is never sent to an upstream. A non-placeholder bearer skips
+resolve and runs the normal exchange (backward compatible). Resolve is
+gated by the same route match as the exchange — the handle is never
+resolved before a route is confirmed, so a leaked handle can't pull the
+real token into a header bound for an unmatched host.
+
+### Passthrough hosts receive the placeholder, not the real token
+
+With mint on, the agent never holds the real token, so any non-exchange
+(passthrough) egress forwards the opaque `abph_` handle as-is. It is
+useless off-box. Any host that needs a real credential MUST be
+configured as a `token-exchange` route — passthrough egress cannot
+produce one.
+
+### The store is in-memory and process-scoped
+
+The handle→token store lives in memory and is shared only within a
+single process. The mode therefore works only where inbound mint and
+outbound resolve run in the **same** process:
+
+- the reverse+forward proxy sidecar (`authbridge-proxy` /
+  `authbridge-lite`);
+- a **single-replica** extproc/extauthz (`authbridge-envoy`).
+
+Multi-replica (HA) or shared/scaled Istio ambient waypoint deployments
+can land mint and resolve on different processes, which the in-memory
+store cannot bridge. Those need an external store behind the same
+interface — a **current limitation**, tracked as a future enhancement.
+
+### Security
+
+- The handle is a random `abph_`-prefixed token (CSPRNG ≥256-bit),
+  meaningless outside the minting process's store.
+- The real token never reaches the agent and never persists to disk
+  (in-memory store only).
+- Neither the real token nor the handle is logged in cleartext —
+  records carry a hash or the prefix only (see the "NEVER put raw
+  tokens" rules under [Emitting session events](#emitting-session-events)).
 
 ## Cross-references
 
