@@ -29,6 +29,15 @@ type Identity interface {
 	Scopes() []string // granted scopes / roles
 }
 
+// SharedStore is a process-scoped key→value store with TTL, injected by the
+// listener so plugins can share state across the inbound→outbound request
+// boundary (e.g. credential placeholders). Implemented by authlib/shared.Store.
+type SharedStore interface {
+	Put(key string, val any, ttl time.Duration)
+	Get(key string) (any, bool)
+	Delete(key string)
+}
+
 // Direction indicates whether a request is inbound (caller → this agent) or
 // outbound (this agent → target service).
 type Direction int
@@ -122,6 +131,10 @@ type Context struct {
 	// to extract the URI SAN. Listeners use it to populate
 	// SessionEvent.TLS for the observability surface.
 	TLS *tls.ConnectionState
+
+	// Shared is the process-scoped store the listener injects. May be nil
+	// when no store is wired; plugins that require it must fail closed.
+	Shared SharedStore
 
 	// Response-phase fields (populated by listener before RunResponse).
 	// ResponseBody may be nil even during response phase if no plugin declared BodyAccess.

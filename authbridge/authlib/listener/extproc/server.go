@@ -36,7 +36,8 @@ type Server struct {
 	extprocv3.UnimplementedExternalProcessorServer
 	InboundPipeline  *pipeline.Holder
 	OutboundPipeline *pipeline.Holder
-	Sessions         *session.Store // nil when session tracking is disabled
+	Sessions         *session.Store       // nil when session tracking is disabled
+	Shared           pipeline.SharedStore // process-scoped store; set by main, may be nil
 }
 
 // Process handles the bidirectional ext_proc stream.
@@ -149,9 +150,11 @@ func (s *Server) handleInbound(stream extprocv3.ExternalProcessor_ProcessServer,
 		Path:      getHeader(headers, ":path"),
 		Headers:   headerMapToHTTP(headers),
 		Body:      body,
+		Shared:    s.Shared,
 		StartedAt: time.Now(),
 	}
 
+	originalAuth := pctx.Headers.Get("Authorization")
 	action := s.InboundPipeline.Run(ctx, pctx)
 	if action.Type == pipeline.Reject {
 		s.recordInboundReject(pctx, action)
@@ -159,6 +162,9 @@ func (s *Server) handleInbound(stream extprocv3.ExternalProcessor_ProcessServer,
 	}
 
 	s.recordInboundSession(pctx)
+	if newAuth := pctx.Headers.Get("Authorization"); newAuth != originalAuth {
+		return replaceTokenResponse(auth.ExtractBearer(newAuth)), pctx
+	}
 	return allowResponse(), pctx
 }
 
@@ -171,9 +177,11 @@ func (s *Server) handleInboundBody(stream extprocv3.ExternalProcessor_ProcessSer
 		Path:      getHeader(headers, ":path"),
 		Headers:   headerMapToHTTP(headers),
 		Body:      body,
+		Shared:    s.Shared,
 		StartedAt: time.Now(),
 	}
 
+	originalAuth := pctx.Headers.Get("Authorization")
 	action := s.InboundPipeline.Run(ctx, pctx)
 	if action.Type == pipeline.Reject {
 		s.recordInboundReject(pctx, action)
@@ -181,6 +189,9 @@ func (s *Server) handleInboundBody(stream extprocv3.ExternalProcessor_ProcessSer
 	}
 
 	s.recordInboundSession(pctx)
+	if newAuth := pctx.Headers.Get("Authorization"); newAuth != originalAuth {
+		return withBodyMutation(replaceTokenBodyResponse(auth.ExtractBearer(newAuth)), pctx), pctx
+	}
 	return withBodyMutation(allowBodyResponse(), pctx), pctx
 }
 
@@ -325,8 +336,6 @@ func (s *Server) recordOutboundReject(pctx *pipeline.Context, action pipeline.Ac
 	s.Sessions.Append(sid, ev)
 }
 
-
-
 // recordInboundResponseSession appends a Phase:SessionResponse event for the
 // inbound direction. Called after RunResponse completes so the event carries
 // the updated SessionID (from the response body's contextId, when an A2A
@@ -398,9 +407,6 @@ func (s *Server) recordOutboundResponseSession(pctx *pipeline.Context) {
 	}
 }
 
-
-
-
 // rekeyInboundSession renames the DefaultSessionID bucket to the
 // server-assigned A2A contextId when the response reveals one, so events
 // from the first turn (recorded under "default" during the request phase)
@@ -441,9 +447,6 @@ func (s *Server) recordOutboundSession(pctx *pipeline.Context) {
 	}
 }
 
-
-
-
 func (s *Server) handleOutbound(stream extprocv3.ExternalProcessor_ProcessServer, headers *corev3.HeaderMap, body []byte) (*extprocv3.ProcessingResponse, *pipeline.Context) {
 	ctx := stream.Context()
 	pctx := &pipeline.Context{
@@ -454,6 +457,7 @@ func (s *Server) handleOutbound(stream extprocv3.ExternalProcessor_ProcessServer
 		Path:      getHeader(headers, ":path"),
 		Headers:   headerMapToHTTP(headers),
 		Body:      body,
+		Shared:    s.Shared,
 		StartedAt: time.Now(),
 	}
 	if pctx.Host == "" {
@@ -492,6 +496,7 @@ func (s *Server) handleOutboundBody(stream extprocv3.ExternalProcessor_ProcessSe
 		Path:      getHeader(headers, ":path"),
 		Headers:   headerMapToHTTP(headers),
 		Body:      body,
+		Shared:    s.Shared,
 		StartedAt: time.Now(),
 	}
 	if pctx.Host == "" {
@@ -645,7 +650,6 @@ func headerMapToHTTP(headers *corev3.HeaderMap) http.Header {
 	return h
 }
 
-
 func requestBodyResponse() *extprocv3.ProcessingResponse {
 	return &extprocv3.ProcessingResponse{
 		Response: &extprocv3.ProcessingResponse_RequestHeaders{
@@ -747,6 +751,10 @@ func replaceTokenBodyResponse(token string) *extprocv3.ProcessingResponse {
 								},
 							},
 						},
+						// Strip the internal direction header before forwarding,
+						// matching allowResponse/allowBodyResponse — otherwise
+						// Envoy leaks x-authbridge-direction to the agent/target.
+						RemoveHeaders: []string{"x-authbridge-direction"},
 					},
 				},
 			},
@@ -768,6 +776,10 @@ func replaceTokenResponse(token string) *extprocv3.ProcessingResponse {
 								},
 							},
 						},
+						// Strip the internal direction header before forwarding,
+						// matching allowResponse/allowBodyResponse — otherwise
+						// Envoy leaks x-authbridge-direction to the agent/target.
+						RemoveHeaders: []string{"x-authbridge-direction"},
 					},
 				},
 			},

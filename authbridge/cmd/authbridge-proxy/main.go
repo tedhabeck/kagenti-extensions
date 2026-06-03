@@ -30,6 +30,7 @@ import (
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/reloader"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/session"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/sessionapi"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/shared"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/spiffe"
 	authtls "github.com/kagenti/kagenti-extensions/authbridge/authlib/tls"
 
@@ -251,6 +252,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("creating forward proxy: %v", err)
 	}
+	sharedStore := shared.New()
+	defer sharedStore.Close() // stop the TTL janitor on normal main return
+	rpSrv.Shared = sharedStore
+	fpSrv.Shared = sharedStore
 	httpServers = append(httpServers, startReverseProxyServer("reverse-proxy", rpSrv, cfg.Listener.ReverseProxyAddr))
 	httpServers = append(httpServers, startHTTPServer("forward-proxy", fpSrv.Handler(), cfg.Listener.ForwardProxyAddr))
 	_ = mtlsMetrics // TODO Phase 2: surface metrics through /stats

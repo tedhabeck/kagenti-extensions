@@ -31,7 +31,8 @@ const maxBodySize = 1 << 20 // 1MB — matches Envoy's default per_stream_buffer
 // in-flight requests finish on the pipeline they started with.
 type Server struct {
 	OutboundPipeline *pipeline.Holder
-	Sessions         *session.Store // nil when session tracking is disabled
+	Sessions         *session.Store       // nil when session tracking is disabled
+	Shared           pipeline.SharedStore // process-scoped store; set by main, may be nil
 	Client           *http.Client
 }
 
@@ -163,6 +164,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		Host:      r.Host,
 		Path:      r.URL.Path,
 		Headers:   r.Header.Clone(),
+		Shared:    s.Shared,
 		StartedAt: time.Now(),
 	}
 

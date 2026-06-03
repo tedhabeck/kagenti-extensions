@@ -50,7 +50,8 @@ func (e *responseRejectedError) Error() string {
 // in-flight requests finish on the pipeline they started with.
 type Server struct {
 	InboundPipeline *pipeline.Holder
-	Sessions        *session.Store // nil when session tracking is disabled
+	Sessions        *session.Store       // nil when session tracking is disabled
+	Shared          pipeline.SharedStore // process-scoped store; set by main, may be nil
 	proxy           *httputil.ReverseProxy
 	backend         string
 
@@ -169,6 +170,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		Host:      r.Host,
 		Path:      r.URL.Path,
 		Headers:   r.Header.Clone(),
+		Shared:    s.Shared,
 		StartedAt: time.Now(),
 	}
 
@@ -207,6 +209,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		slog.Debug("reverse-proxy: buffered request body", "host", r.Host, "bodyLen", len(body))
 	}
 
+	originalAuth := pctx.Headers.Get("Authorization")
 	action := s.InboundPipeline.Run(r.Context(), pctx)
 	if action.Type == pipeline.Reject {
 		s.recordInboundReject(pctx, action)
@@ -222,6 +225,15 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		r.ContentLength = int64(len(pctx.Body))
 		r.Header.Set("Content-Length", fmt.Sprintf("%d", len(pctx.Body)))
 		r.Header.Del("Content-Encoding")
+	}
+
+	// Propagate an inbound Authorization mutation to the forwarded
+	// request. A plugin (e.g. jwt-validation in mint mode) may have
+	// replaced the caller's token on pctx.Headers; the proxy forwards
+	// r.Header, so without this the backend would still see the original
+	// token. Only rewrite when the value actually changed.
+	if newAuth := pctx.Headers.Get("Authorization"); newAuth != originalAuth {
+		r.Header.Set("Authorization", newAuth)
 	}
 
 	// Inbound recording is gated on A2A by design: reverseproxy is the

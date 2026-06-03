@@ -14,6 +14,7 @@ import (
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/auth"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/config"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/placeholder"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenexchange/cache"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenexchange/exchange"
@@ -65,6 +66,8 @@ type tokenExchangeConfig struct {
 	// routing.ServiceNameFromHost(host) as the target audience. Used in
 	// waypoint mode.
 	AudienceFromHost bool `json:"audience_from_host" description:"When true, derive audience from host for unrouted requests (waypoint mode)." default:"false"`
+
+	ResolvePlaceholders bool `json:"resolve_placeholders" default:"false" description:"Resolve an inbound bearer carrying the placeholder prefix from the shared store to the real token before exchange. Unresolvable placeholders are denied (fail closed)."`
 }
 
 type tokenExchangeIdentity struct {
@@ -566,6 +569,14 @@ func (p *TokenExchange) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 	authHeader := pctx.Headers.Get("Authorization")
 	host := pctx.Host
 
+	if p.cfg.ResolvePlaceholders && placeholder.IsPlaceholder(auth.ExtractBearer(authHeader)) {
+		real, ok := resolvePlaceholder(pctx, auth.ExtractBearer(authHeader))
+		if !ok {
+			return pctx.DenyAndRecord("placeholder_unresolved", "auth.unauthorized", "unresolvable credential placeholder")
+		}
+		authHeader = "Bearer " + real
+	}
+
 	result := p.inner.HandleOutbound(ctx, authHeader, host)
 	// Record an Auth.Outbound entry on every branch so operators have
 	// full outbound audit in the session stream — matches the inbound
@@ -631,6 +642,20 @@ func (p *TokenExchange) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 		})
 	}
 	return pipeline.Action{Type: pipeline.Continue}
+}
+
+// resolvePlaceholder looks a handle up in the shared store. Returns ok=false
+// (fail closed) when no store is wired or the handle is unknown/expired.
+func resolvePlaceholder(pctx *pipeline.Context, handle string) (string, bool) {
+	if pctx.Shared == nil {
+		return "", false
+	}
+	v, ok := pctx.Shared.Get(placeholder.Key(handle))
+	if !ok {
+		return "", false
+	}
+	s, ok := v.(string)
+	return s, ok
 }
 
 // boolStr renders a boolean as "true" / "false" for Invocation.Details.
