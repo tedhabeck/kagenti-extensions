@@ -14,7 +14,7 @@
 # Prerequisites:
 #   - kagenti installed on a kind cluster (this is the operator-flow demo)
 #   - kubectl, kind, podman/docker, python3 + PyYAML
-#   - python-keycloak (for setup-keycloak; pip install python-keycloak)
+#   - python-keycloak (for setup-keycloak; pip3 install --user python-keycloak)
 
 .PHONY: help preflight build-sidecar load-sidecar override-sidecar-image \
         build-images load-images deploy wait-pods setup-keycloak \
@@ -92,6 +92,13 @@ preflight:  ## Verify kagenti is installed + tools are available
 	@python3 -c 'import yaml' 2>/dev/null || { \
 	  echo "ERROR: python3-yaml (PyYAML) is required."; \
 	  echo "       Install: pip3 install --user pyyaml"; \
+	  exit 1; \
+	}
+	@python3 -c 'import keycloak' 2>/dev/null || { \
+	  echo "ERROR: python-keycloak is required (used later by setup-keycloak)."; \
+	  echo "       Install: pip3 install --user python-keycloak"; \
+	  echo "       Checked here in preflight so demo-echo fails before the"; \
+	  echo "       build/deploy steps rather than after them."; \
 	  exit 1; \
 	}
 
@@ -225,11 +232,11 @@ wait-pods:  ## Wait for pods + operator-rendered authbridge ConfigMap
 # can't reach that, port-forward in another terminal:
 #   kubectl port-forward service/keycloak-service -n keycloak 8080:8080
 # and set KEYCLOAK_URL=http://localhost:8080.
-# Requires the python-keycloak package: pip install python-keycloak
+# Requires the python-keycloak package: pip3 install --user python-keycloak
 setup-keycloak:  ## Configure Keycloak (echo-upstream client, scopes, demo users)
 	@python3 -c 'import keycloak' 2>/dev/null || { \
 	  echo "ERROR: python-keycloak is required for setup-keycloak."; \
-	  echo "       Install: pip install python-keycloak"; \
+	  echo "       Install: pip3 install --user python-keycloak"; \
 	  exit 1; \
 	}
 	python3 scripts/setup_keycloak.py --namespace $(NAMESPACE) --service-account $(AGENT_NAME)
