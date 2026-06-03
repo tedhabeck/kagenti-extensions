@@ -71,8 +71,15 @@ the optional exchange scope. The script:
 
 ## Step 2: Import the Weather Tool via Kagenti UI
 
+> ⚠️ **Use the `-advanced` names exactly.** **Tool Name** must be
+> `weather-tool-advanced` (not `weather-tool`). The Keycloak script in
+> Step 1 registered SPIFFE / audience scopes for the `-advanced`
+> ServiceAccount; if you import as `weather-tool`, the Service ends up as
+> `weather-tool-mcp` instead of `weather-tool-advanced-mcp` and the
+> `MCP_URL` + outbound route in Step 3 won't resolve.
+
 1. Open [Import Tool](http://kagenti-ui.localtest.me:8080/tools/import).
-2. **Namespace**: `team1` · **Tool Name**: `weather-tool-advanced`.
+2. **Namespace**: `team1` · **Tool Name**: `weather-tool-advanced` (exact).
 3. **Deploy From Image** · **Container Image**:
    `ghcr.io/kagenti/agent-examples/weather_tool` · **Image Tag**: `latest`.
 4. **MCP Transport Protocol**: `streamable HTTP`.
@@ -80,8 +87,8 @@ the optional exchange scope. The script:
    validates JWTs at the tool's ingress — this is the difference vs. the
    standard demo).
 6. **Enable SPIRE identity (spiffe-helper sidecar)**: ✅ **check**.
-7. **Service Port** `8000`.
-8. Click **Deploy Tool**.
+7. **Service Port** `8000` · **Target Port** `8000`.
+8. Click **Build & Deploy Tool**.
 
 Wait for the tool pod to be **Ready**. Once it registers in Keycloak, the
 `setup_keycloak_weather_advanced.py` from Step 1 unblocks.
@@ -109,10 +116,16 @@ kubectl create secret generic openai-secret -n team1 \
 > exported), the agent fails with `Error: No LLM API key configured.` — see
 > [Troubleshooting](#troubleshooting).
 
-Now the UI flow:
+> ⚠️ **Use the `-advanced` name exactly.** **Agent Name** must be
+> `weather-service-advanced` (not `weather-service`). The Keycloak script
+> in Step 1 registered SPIFFE / audience scopes for the `-advanced`
+> ServiceAccount; the wrong name lands you with mismatched audiences and
+> a 401/503 from token exchange.
+
+Now the UI flow (order matches the actual import form top-to-bottom):
 
 1. Open [Import Agent](http://kagenti-ui.localtest.me:8080/agents/import).
-2. **Namespace**: `team1` · **Agent Name**: `weather-service-advanced`.
+2. **Namespace**: `team1` · **Agent Name**: `weather-service-advanced` (exact).
 3. **Build from Source**:
    - Git Repository URL: `https://github.com/kagenti/agent-examples`
    - Git Branch or Tag: `main`
@@ -122,8 +135,23 @@ Now the UI flow:
    `Deployment`.
 5. **Enable AuthBridge sidecar injection**: ✅ (default).
 6. **Enable SPIRE identity**: ✅ (default).
-7. **Service Port** `8080`, **Target Port** `8000`.
-8. Under **Environment Variables**, click **Import from File/URL** → **From
+7. Expand **Outbound Routing Rules** and add one route — this is what
+   triggers the RFC 8693 exchange when the agent calls the tool. The form
+   has three fields (currently unlabeled in the UI); fill them in this
+   order:
+
+   1. Host: `weather-tool-advanced-mcp`
+   2. Target Audience: `spiffe://localtest.me/ns/team1/sa/weather-tool-advanced`
+   3. Token Scopes: `openid weather-tool-exchange-aud`
+
+   > If **Outbound Routing Rules** is missing or unresponsive, your Kagenti
+   > backend may pre-date [kagenti#1194](https://github.com/kagenti/kagenti/pull/1194).
+   > Apply the equivalent ConfigMap with kubectl (
+   > `kubectl apply -f authbridge/demos/weather-agent/k8s/configmaps-advanced.yaml`)
+   > and skip this expander. Same content, list-shaped `routes.yaml`.
+
+8. **Service Port** `8080` · **Target Port** `8000`.
+9. Under **Environment Variables**, click **Import from File/URL** → **From
    URL**, paste one of the beginner agent's env files, and click
    **Fetch & Parse**:
    - OpenAI: `https://raw.githubusercontent.com/kagenti/agent-examples/refs/heads/main/a2a/weather_service/.env.openai`
@@ -137,19 +165,6 @@ Now the UI flow:
    ```
    MCP_URL=http://weather-tool-advanced-mcp:8000/mcp
    ```
-9. Expand **Outbound Routing Rules** and add one route — this is what triggers
-   the RFC 8693 exchange when the agent calls the tool:
-
-   | Host | Target Audience | Token Scopes |
-   |------|----------------|--------------|
-   | `weather-tool-advanced-mcp` | `spiffe://localtest.me/ns/team1/sa/weather-tool-advanced` | `openid weather-tool-exchange-aud` |
-
-   > If **Outbound Routing Rules** is missing or unresponsive, your Kagenti
-   > backend may pre-date [kagenti#1194](https://github.com/kagenti/kagenti/pull/1194).
-   > Apply the equivalent ConfigMap with kubectl (
-   > `kubectl apply -f authbridge/demos/weather-agent/k8s/configmaps-advanced.yaml`)
-   > and skip this expander. Same content, list-shaped `routes.yaml`.
-
 10. **(Ollama only)** Expand **AuthBridge Advanced Configuration** and set
     **Outbound Ports to Exclude** to `11434`. OpenAI uses HTTPS and needs no
     exclusion.
@@ -165,6 +180,14 @@ python demos/weather-agent/setup_keycloak_weather_advanced.py -n team1
 ---
 
 ## Step 4: Chat via Kagenti UI
+
+> **Expected catalog quirk.** The **Agent Catalog** shows **two** entries:
+> `weather-service-advanced` *and* `weather-tool-advanced`. The **Tool
+> Catalog** is empty. This is by design — the advanced demo labels the
+> tool with `kagenti.io/type: agent` so AuthBridge gets injected on it
+> (the `injectTools` feature gate is off by default; see the
+> [kubectl appendix](#operator-gotchas)). Pick `weather-service-advanced`
+> for chat.
 
 1. **Agent Catalog** → namespace `team1` → `weather-service-advanced` →
    **View Details**. The agent card should render (proves the agent is up and
@@ -234,6 +257,8 @@ Useful env knobs:
 | Token exchange denied | Tool client missing `standard.token.exchange.enabled` | Re-run setup with `--wait-tool-client` after the tool pod registers. |
 | Tool pod CrashLoopBackOff (`mcp` container) | The `weather_tool` image runs as UID 1001; a `securityContext` overriding the user breaks `uv run` | Use the manifests in `k8s/` as-is (they set `runAsUser/Group/fsGroup: 1001`). On OpenShift, see the [upstream Dockerfile](https://github.com/kagenti/agent-examples/blob/main/mcp/weather_tool/Dockerfile). |
 | Tool ingress logs missing `[Inbound]` | Combined sidecar uses different log text | Grep for `Token validated` instead, or increase log window. |
+| Deleted the agent or tool, but the Deployment + Service reappear within seconds | The Kagenti backend's reconciliation service finalizes "orphaned" Shipwright builds by re-creating workloads | Also delete the Shipwright `Build` and `BuildRun` (see the [Cleanup](#cleanup) snippet). |
+| Chat returns `Cannot connect to MCP weather service at http://weather-tool-advanced-mcp:8000/mcp` | UI import used the standard names (`weather-tool` / `weather-service`) instead of `-advanced`, so the actual Service is `weather-tool-mcp` and `MCP_URL` doesn't resolve | Re-import using the exact `-advanced` names. The Keycloak script from Step 1 also expects those names. |
 
 Tool ingress and agent outbound logs (container name varies by AuthBridge mode
 — `authbridge-proxy` for proxy-sidecar default, `envoy-proxy` for envoy-sidecar):
@@ -253,6 +278,14 @@ Delete via the Kagenti UI (Tool Catalog / Agent Catalog), or via CLI:
 kubectl delete deployment,svc,sa -n team1 \
   -l app.kubernetes.io/name=weather-service-advanced --ignore-not-found
 kubectl delete deployment,svc,sa -n team1 \
+  -l app.kubernetes.io/name=weather-tool-advanced --ignore-not-found
+
+# Also delete the Shipwright Build/BuildRun, otherwise the Kagenti
+# backend's reconciliation service treats them as "orphaned" and
+# recreates the Deployment + Service + ServiceAccount within seconds:
+kubectl delete build.shipwright.io,buildrun.shipwright.io -n team1 \
+  -l app.kubernetes.io/name=weather-service-advanced --ignore-not-found
+kubectl delete build.shipwright.io,buildrun.shipwright.io -n team1 \
   -l app.kubernetes.io/name=weather-tool-advanced --ignore-not-found
 ```
 
