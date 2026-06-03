@@ -101,9 +101,13 @@ Same platform assumptions as
   `envoy-config`, `spiffe-helper-config`, and `keycloak-admin-secret`.
 - Python 3.10+ and `pip install -r AuthBridge/requirements.txt` for the Keycloak
   helper script.
-- For **chat-style** verification: an LLM (Ollama on the host with the model
-  referenced in the Deployment, or OpenAI with keys in a Secret) and outbound
-  port **11434** excluded on the agent (see below).
+- For **chat-style** verification through the Kagenti UI: a working LLM provider
+  configured on the agent — either Ollama on the host (with outbound port
+  **11434** excluded on the agent) or OpenAI with keys in a Secret. See
+  [LLM provider (Ollama or OpenAI)](#llm-provider-ollama-or-openai) below.
+  `deploy_and_verify_advanced.sh` does **not** exercise the LLM path; it can
+  succeed while the UI still returns `Connection error` or `No LLM API key
+  configured`.
 
 ## Resource Names (kubectl path)
 
@@ -189,12 +193,83 @@ kubectl rollout status deployment/weather-service-advanced -n team1 --timeout=42
 python demos/weather-agent/setup_keycloak_weather_advanced.py -n team1
 ```
 
-### Ollama and outbound port exclusion
+### LLM provider (Ollama or OpenAI)
+
+`deploy_and_verify_advanced.sh` only exercises the AuthBridge / MCP token-exchange
+path; it does **not** call the LLM. Chat-style verification through the Kagenti UI
+fails with `Error: LLM execution failed: Connection error.` or
+`Error: No LLM API key configured.` if the agent cannot reach a working LLM, even
+though the deploy/verify script reports success. The shipped manifest defaults to
+Ollama; pick one of the options below.
+
+#### Option A — Ollama on the host (default manifest)
 
 The sample agent manifest sets `LLM_API_BASE` to `host.docker.internal:11434` and
-annotates the pod with `kagenti.io/outbound-ports-exclude: "11434"`. If you
-import through the UI instead, set **Outbound Ports to Exclude** to `11434` the
-same way as in [demo-ui.md](demo-ui.md#ollama-port-exclusion).
+annotates the pod with `kagenti.io/outbound-ports-exclude: "11434"`. Start Ollama
+and pull the model the manifest references:
+
+```bash
+ollama serve &
+ollama pull llama3.2:3b-instruct-fp16
+```
+
+If you import through the UI instead, set **Outbound Ports to Exclude** to `11434`
+the same way as in [demo-ui.md](demo-ui.md#ollama-port-exclusion).
+
+> Known Ollama tool-calling quirks may still cause errors with some agent
+> frameworks; see [agent-examples#173](https://github.com/kagenti/agent-examples/issues/173).
+> If you hit them, switch to **Option B**.
+
+#### Option B — OpenAI
+
+Create the secret and patch the agent Deployment to use OpenAI:
+
+```bash
+kubectl create secret generic openai-secret -n team1 \
+  --from-literal=apikey="<YOUR_OPENAI_API_KEY>"
+
+kubectl set env deployment/weather-service-advanced -n team1 -c agent \
+  LLM_API_BASE="https://api.openai.com/v1" \
+  LLM_MODEL="gpt-4o-mini-2024-07-18"
+
+kubectl patch deployment weather-service-advanced -n team1 --type=json -p='[
+  {"op":"add","path":"/spec/template/spec/containers/0/env/-","value":{
+    "name":"LLM_API_KEY",
+    "valueFrom":{"secretKeyRef":{"name":"openai-secret","key":"apikey"}}
+  }},
+  {"op":"add","path":"/spec/template/spec/containers/0/env/-","value":{
+    "name":"OPENAI_API_KEY",
+    "valueFrom":{"secretKeyRef":{"name":"openai-secret","key":"apikey"}}
+  }}
+]'
+```
+
+The manifest already declares `LLM_API_KEY: "ollama"` as a literal, so the patch
+above adds a second `LLM_API_KEY` from the secret. Kubernetes uses the last
+definition (the secret-backed one) at pod start; if you prefer a single clean
+entry, remove the literal first and re-add the secret-backed one:
+
+```bash
+kubectl set env deployment/weather-service-advanced -n team1 -c agent LLM_API_KEY-
+
+kubectl patch deployment weather-service-advanced -n team1 --type=json -p='[
+  {"op":"add","path":"/spec/template/spec/containers/0/env/-","value":{
+    "name":"LLM_API_KEY",
+    "valueFrom":{"secretKeyRef":{"name":"openai-secret","key":"apikey"}}
+  }}
+]'
+```
+
+Verify the pod sees a non-empty key (env vars from secrets are read at pod start,
+so a restart is required after editing the secret):
+
+```bash
+kubectl -n team1 exec deploy/weather-service-advanced -c agent -- \
+  sh -c 'echo "LLM_API_KEY len=${#LLM_API_KEY}"'
+```
+
+OpenAI traffic is HTTPS, which AuthBridge passes through; you do **not** need to
+add `443` to `kagenti.io/outbound-ports-exclude`.
 
 ## Step 4 (Optional): Kagenti UI
 
@@ -311,6 +386,8 @@ no longer need them.
 | 401 on tool MCP | Wrong `target_audience` or scope mapper | `target_audience` must equal tool SPIFFE; scope `weather-tool-exchange-aud` must map that audience |
 | Token exchange denied | Tool Keycloak client missing `standard.token.exchange.enabled` | Re-run setup with `--wait-tool-client` after the tool pod registers |
 | No `[Inbound]` log line | Combined sidecar logging format | Grep for `Token validated` or increase log window |
+| UI returns `Error: LLM execution failed: Connection error.` while `deploy_and_verify_advanced.sh` succeeds | Agent cannot reach the configured LLM (default `host.docker.internal:11434`); Ollama isn't running or the model isn't pulled | Start Ollama and pull the model, **or** switch the agent to OpenAI (see [LLM provider](#llm-provider-ollama-or-openai)) |
+| UI returns `Error: No LLM API key configured. Set the LLM_API_KEY environment variable.` | `openai-secret` is empty (often because the shell's `$OPENAI_API_KEY` was not exported when running `kubectl create secret`), or the agent pod was not restarted after updating the secret | Recreate the secret with a literal value (`--from-literal=apikey=sk-...`), confirm with `kubectl get secret openai-secret -o jsonpath='{.data.apikey}' \| base64 -d \| wc -c`, then `kubectl rollout restart deployment/weather-service-advanced -n team1` |
 
 See also the operational table in the AuthBridge testing skill used for this repo.
 
