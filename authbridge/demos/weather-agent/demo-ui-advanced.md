@@ -162,7 +162,7 @@ Now the UI flow (order matches the actual import form top-to-bottom):
 
    After import, **edit `MCP_URL`** in the variable list to point at the
    advanced tool service:
-   ```
+   ```text
    MCP_URL=http://weather-tool-advanced-mcp:8000/mcp
    ```
 10. **(Ollama only)** Expand **AuthBridge Advanced Configuration** and set
