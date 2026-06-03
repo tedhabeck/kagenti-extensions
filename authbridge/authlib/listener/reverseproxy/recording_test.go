@@ -24,7 +24,8 @@ func (allowOnlyPlugin) OnRequest(_ context.Context, pctx *pipeline.Context) pipe
 	pctx.Allow("ok") // records ActionAllow; holder stamps the plugin name
 	return pipeline.Action{Type: pipeline.Continue}
 }
-func (allowOnlyPlugin) OnResponse(_ context.Context, _ *pipeline.Context) pipeline.Action {
+func (allowOnlyPlugin) OnResponse(_ context.Context, pctx *pipeline.Context) pipeline.Action {
+	pctx.Observe("resp-ok") // response-phase invocation; exercises the modifyResponse gate
 	return pipeline.Action{Type: pipeline.Continue}
 }
 
@@ -97,5 +98,33 @@ func TestReverseProxy_RecordsInboundAllowWithoutA2A(t *testing.T) {
 	}
 	if !foundAllow {
 		t.Fatalf("test-allow ALLOW invocation not found on request event: %+v", reqEvent.Invocations.Inbound)
+	}
+
+	// The response-phase gate in modifyResponse is widened the same way.
+	// Assert the inbound response event was recorded with its response-phase
+	// invocation, locking in the second gate against regression too.
+	var respEvent *pipeline.SessionEvent
+	for i := range v.Events {
+		ev := v.Events[i]
+		if ev.Direction == pipeline.Inbound && ev.Phase == pipeline.SessionResponse {
+			respEvent = &v.Events[i]
+			break
+		}
+	}
+	if respEvent == nil {
+		t.Fatalf("no inbound response event recorded; events=%+v", v.Events)
+	}
+	if respEvent.Invocations == nil || len(respEvent.Invocations.Inbound) == 0 {
+		t.Fatalf("response event has no inbound invocations: %+v", respEvent)
+	}
+	var foundResp bool
+	for _, inv := range respEvent.Invocations.Inbound {
+		if inv.Plugin == "test-allow" && inv.Action == pipeline.ActionObserve {
+			foundResp = true
+			break
+		}
+	}
+	if !foundResp {
+		t.Fatalf("test-allow response invocation not found on response event: %+v", respEvent.Invocations.Inbound)
 	}
 }

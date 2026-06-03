@@ -328,8 +328,8 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 	// SSE responses still get recorded — the body is whatever the
 	// pipeline saw at this point (may be empty for streamed bodies),
 	// but the status code and plugin invocations are always meaningful.
-	respPlugins := pipeline.SnapshotPlugins(pctx.Extensions.Custom)
-	if s.Sessions != nil && (pctx.Extensions.A2A != nil || pctx.Extensions.Invocations != nil || respPlugins != nil) {
+	plugins := pipeline.SnapshotPlugins(pctx.Extensions.Custom)
+	if s.Sessions != nil && (pctx.Extensions.A2A != nil || pctx.Extensions.Invocations != nil || plugins != nil) {
 		sid := inboundSessionID(pctx)
 		s.Sessions.Append(sid, pipeline.SessionEvent{
 			At:          time.Now(),
@@ -337,7 +337,7 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 			Phase:       pipeline.SessionResponse,
 			A2A:         pipeline.SnapshotA2A(pctx.Extensions.A2A),
 			Invocations: pipeline.SnapshotInvocations(pctx.Extensions.Invocations, pipeline.InvocationPhaseResponse),
-			Plugins:     respPlugins,
+			Plugins:     plugins,
 			Identity:    pipeline.SnapshotIdentity(pctx),
 			Host:        pctx.Host,
 			StatusCode:  resp.StatusCode,
